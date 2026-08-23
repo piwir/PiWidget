@@ -20,7 +20,8 @@
         "minHeight": 360,
         "decorations": false,
         "transparent": true,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
+        "dragDropEnabled": false,
         "resizable": true
       }
     ],
@@ -31,6 +32,6 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "rpm", "msi", "nsis"],
-    "icon": ["icons/icon.png"]
+    "icon": ["icons/icon.png", "icons/icon.ico"]
   }
 }

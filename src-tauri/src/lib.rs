@@ -1,4 +1,5 @@
 use tauri::Manager;
+use tauri_plugin_autostart::MacosLauncher;
 
 /// 返回数据文件完整路径：app_data_dir()/data.json
 /// （目录由 identifier com.piwidget.app 派生，如 Windows 下 %APPDATA%/com.piwidget.app）
@@ -8,6 +9,8 @@ fn data_path(app: tauri::AppHandle) -> Result<String, String> {
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?;
+    // app_data_dir() 只返回路径不建目录；首次运行（新 identifier）需显式创建
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let p = dir.join("data.json");
     Ok(p.to_string_lossy().into_owned())
 }
@@ -29,6 +32,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .invoke_handler(tauri::generate_handler![data_path, read_file, write_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

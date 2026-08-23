@@ -1,9 +1,9 @@
 /* PiWidget · 全局 store（模块级单例）
  * 数据持久化：Tauri 下写 app_data_dir()/data.json（目录由 identifier 派生），浏览器下 localStorage。
- * schema v2：notes[] + timetable{day: {period: 课程名}}，无时间逻辑。
- * v1（note 字符串 + periods）加载/导入时自动迁移。
+ * schema v3：notes[] + timetables[{id,name,cells{day:{period:课程名}}}] + activeTimetableId。
+ * v1（note 字符串）/ v2（单一 timetable）加载/导入时自动迁移。
  */
-import { reactive, ref } from 'vue';
+import { reactive, ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -17,11 +17,13 @@ const SAVE_DEBOUNCE = 800;
 
 export function defaultState() {
   return {
-    version: 2,
-    pinned: true,
+    version: 3,
+    pinned: false,
+    ghost: false,
     timetableCollapsed: false,
     notes: [],
-    timetable: {},
+    timetables: [{ id: 'default', name: '默认', cells: {} }],
+    activeTimetableId: 'default',
   };
 }
 
@@ -38,6 +40,17 @@ function cleanTimetable(t) {
   return out;
 }
 
+function cleanTimetables(tts) {
+  const out = (Array.isArray(tts) ? tts : [])
+    .filter((t) => t && typeof t === 'object')
+    .map((t, i) => ({
+      id: typeof t.id === 'string' && t.id ? t.id : `tt-${i}`,
+      name: typeof t.name === 'string' && t.name ? t.name : `课表 ${i + 1}`,
+      cells: cleanTimetable(t.cells),
+    }));
+  return out.length ? out : [{ id: 'default', name: '默认', cells: {} }];
+}
+
 function cleanNotes(notes) {
   if (!Array.isArray(notes)) return [];
   return notes
@@ -49,13 +62,26 @@ function cleanNotes(notes) {
     }));
 }
 
-/** 归一化（v1 / v2 均接受），返回 v2 state */
+/** 归一化（v1 / v2 / v3 均接受），返回 v3 state */
 export function migrate(data) {
   const d = defaultState();
   if (typeof data !== 'object' || data === null) return d;
   if (typeof data.pinned === 'boolean') d.pinned = data.pinned;
+  if (typeof data.ghost === 'boolean') d.ghost = data.ghost;
   if (typeof data.timetableCollapsed === 'boolean') d.timetableCollapsed = data.timetableCollapsed;
-  d.timetable = cleanTimetable(data.timetable);
+  if (Array.isArray(data.timetables)) {
+    // v3：多课表
+    d.timetables = cleanTimetables(data.timetables);
+    d.activeTimetableId =
+      typeof data.activeTimetableId === 'string' &&
+      d.timetables.some((t) => t.id === data.activeTimetableId)
+        ? data.activeTimetableId
+        : d.timetables[0].id;
+  } else {
+    // v1 / v2：单一 timetable → 包进「默认」
+    d.timetables = [{ id: 'default', name: '默认', cells: cleanTimetable(data.timetable) }];
+    d.activeTimetableId = 'default';
+  }
   if (Array.isArray(data.notes)) {
     d.notes = cleanNotes(data.notes);
   } else if (typeof data.note === 'string' && data.note) {
@@ -73,21 +99,36 @@ export function validate(data) {
     if (typeof data.timetable !== 'object' || data.timetable === null) return 'timetable 不是对象';
     return null;
   }
-  if (data.version !== 2) return `不支持的 version（当前 ${JSON.stringify(data.version)}）`;
-  if (!Array.isArray(data.notes)) return 'notes 不是数组';
-  for (const n of data.notes) {
-    if (!n || typeof n !== 'object' || typeof n.title !== 'string' || typeof n.content !== 'string') {
-      return 'notes 元素需含字符串 title/content';
+  if (data.version === 2) {
+    if (!Array.isArray(data.notes)) return 'notes 不是数组';
+    for (const n of data.notes) {
+      if (!n || typeof n !== 'object' || typeof n.title !== 'string' || typeof n.content !== 'string') {
+        return 'notes 元素需含字符串 title/content';
+      }
     }
+    if (typeof data.timetable !== 'object' || data.timetable === null) return 'timetable 不是对象';
+    return null;
   }
-  if (typeof data.timetable !== 'object' || data.timetable === null) return 'timetable 不是对象';
-  return null;
+  if (data.version === 3) {
+    if (!Array.isArray(data.notes)) return 'notes 不是数组';
+    for (const n of data.notes) {
+      if (!n || typeof n !== 'object' || typeof n.title !== 'string' || typeof n.content !== 'string') {
+        return 'notes 元素需含字符串 title/content';
+      }
+    }
+    if (!Array.isArray(data.timetables)) return 'timetables 不是数组';
+    return null;
+  }
+  return `不支持的 version（当前 ${JSON.stringify(data.version)}）`;
 }
 
 // ---------- 单例状态 ----------
 const state = reactive(defaultState());
 const expandedId = ref(null); // 当前展开的便笺 id
 const justCreatedId = ref(null); // 新建后待聚焦的便笺 id
+const activeTimetable = computed(
+  () => state.timetables.find((t) => t.id === state.activeTimetableId) || state.timetables[0]
+);
 
 let dataPath = '';
 let saveTimer = null;
@@ -134,7 +175,11 @@ async function load() {
   }
   try {
     const parsed = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null || (parsed.version !== 1 && parsed.version !== 2)) {
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3)
+    ) {
       throw new Error('bad schema');
     }
     Object.assign(state, migrate(parsed));
@@ -185,33 +230,120 @@ function moveNote(from, to) {
   saveSoon();
 }
 
-// ---------- 课表 ----------
+// ---------- 课表（操作当前激活课表） ----------
 function setCell(day, period, text) {
+  const tt = activeTimetable.value;
+  if (!tt) return;
   const key = String(period);
-  if (text) {
-    state.timetable[String(day)] = { ...(state.timetable[String(day)] || {}), [key]: text };
-  } else {
-    const d = { ...(state.timetable[String(day)] || {}) };
-    delete d[key];
-    if (Object.keys(d).length > 0) state.timetable[String(day)] = d;
-    else delete state.timetable[String(day)];
-  }
+  const cells = { ...tt.cells };
+  const d = { ...(cells[String(day)] || {}) };
+  if (text) d[key] = text;
+  else delete d[key];
+  if (Object.keys(d).length > 0) cells[String(day)] = d;
+  else delete cells[String(day)];
+  tt.cells = cells;
   saveSoon();
 }
 
-// ---------- 置顶（仅 Tauri） ----------
+function setActiveTimetable(id) {
+  if (state.timetables.some((t) => t.id === id)) {
+    state.activeTimetableId = id;
+    saveSoon();
+  }
+}
+
+function addTimetable() {
+  const tt = { id: crypto.randomUUID(), name: `课表 ${state.timetables.length + 1}`, cells: {} };
+  state.timetables.push(tt);
+  state.activeTimetableId = tt.id;
+  saveSoon();
+  toast(`已新建「${tt.name}」`);
+}
+
+function renameTimetable(id, name) {
+  const tt = state.timetables.find((t) => t.id === id);
+  if (!tt) return;
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    toast('名称不能为空', true);
+    return;
+  }
+  tt.name = trimmed;
+  saveSoon();
+  toast(`已重命名为「${trimmed}」`);
+}
+
+function deleteTimetable(id) {
+  if (state.timetables.length <= 1) {
+    toast('至少保留一个课表', true);
+    return;
+  }
+  const i = state.timetables.findIndex((t) => t.id === id);
+  if (i < 0) return;
+  const [removed] = state.timetables.splice(i, 1);
+  if (state.activeTimetableId === id) state.activeTimetableId = state.timetables[0].id;
+  saveSoon();
+  toast(`已删除「${removed.name}」`);
+}
+
+// ---------- 透明化（卡片淡出，桌面透出） ----------
+function toggleGhost() {
+  state.ghost = !state.ghost;
+  saveSoon();
+  toast(state.ghost ? '已透明化' : '已恢复显示');
+}
+
+// ---------- 置顶（仅 Tauri；默认不置顶，启动时同步已保存状态） ----------
+async function syncPinned() {
+  if (!isTauri) return;
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    await getCurrentWindow().setAlwaysOnTop(state.pinned);
+  } catch {
+    /* 忽略 */
+  }
+}
+
 async function togglePin() {
   state.pinned = !state.pinned;
-  if (isTauri) {
-    try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      await getCurrentWindow().setAlwaysOnTop(state.pinned);
-    } catch {
-      /* 忽略 */
-    }
-  }
   saveSoon();
   toast(state.pinned ? '已置顶' : '已取消置顶');
+  await syncPinned();
+}
+
+// ---------- 开机自启（仅 Tauri；OS 注册表是事实源，不写入数据文件） ----------
+const autostart = ref(false);
+
+async function refreshAutostart() {
+  if (!isTauri) return;
+  try {
+    const { Autostart } = await import('@tauri-apps/plugin-autostart');
+    autostart.value = await Autostart.plugin().isEnabled();
+  } catch {
+    /* 忽略 */
+  }
+}
+
+async function toggleAutostart() {
+  if (!isTauri) {
+    toast('开机自启仅桌面端可用', true);
+    return;
+  }
+  try {
+    const { Autostart } = await import('@tauri-apps/plugin-autostart');
+    const plugin = Autostart.plugin();
+    if (autostart.value) {
+      await plugin.disable();
+      autostart.value = false;
+      toast('已关闭开机自启');
+    } else {
+      await plugin.enable();
+      autostart.value = true;
+      toast('已开启开机自启');
+    }
+  } catch (e) {
+    toast('自启设置失败：' + e, true);
+  }
 }
 
 // ---------- 导入 / 导出 ----------
@@ -289,6 +421,10 @@ export function useStore() {
     state,
     expandedId,
     justCreatedId,
+    activeTimetable,
+    autostart,
+    refreshAutostart,
+    toggleAutostart,
     load,
     saveNow,
     saveSoon,
@@ -296,7 +432,13 @@ export function useStore() {
     deleteNote,
     moveNote,
     setCell,
+    setActiveTimetable,
+    addTimetable,
+    renameTimetable,
+    deleteTimetable,
     togglePin,
+    syncPinned,
+    toggleGhost,
     exportData,
     importData,
   };

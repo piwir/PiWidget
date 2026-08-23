@@ -140,21 +140,145 @@ def main():
               page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--highlight').trim()")
               .lower() == "#ffd84d")
 
+        print("== 标题栏拖拽 ==")
+        drag_regions = page.locator("[data-tauri-drag-region]")
+        check("26 拖拽区覆盖品牌字 + 填充区", drag_regions.count() == 2 and
+              page.locator(".drag-fill[data-tauri-drag-region]").count() == 1)
+        fill_w = page.evaluate("document.querySelector('.drag-fill').getBoundingClientRect().width")
+        check("27 填充区占据标题栏空白（> 300px）", fill_w > 300, str(fill_w))
+        pin = page.locator(".icon-btn[title='置顶']")
+        check("28 初始不置顶（默认 pinned=false）", pin.get_attribute("aria-pressed") == "false")
+        pin.click()
+        page.wait_for_timeout(150)
+        check("29 拖拽区外按钮仍可点击（置顶切换）", pin.get_attribute("aria-pressed") != "false")
+
+        print("== 透明化 ==")
+        ghost_btn = page.locator(".icon-btn[title='透明化']")
+        check("30 透明化按钮存在且初始未激活", ghost_btn.count() == 1 and
+              ghost_btn.get_attribute("aria-pressed") == "false")
+        ghost_btn.click()
+        page.wait_for_timeout(300)
+        check("31 点击后卡片淡出（.sheet.ghost）", page.evaluate("document.querySelector('.sheet').classList.contains('ghost')"))
+        page.keyboard.press("Control+s")
+        page.wait_for_timeout(300)
+        saved2 = page.evaluate("localStorage.getItem('piwidget-data')")
+        check("32 透明化状态已持久化", saved2 and '"ghost": true' in saved2)
+        ghost_btn.click()  # 复原，不影响截图
+        page.wait_for_timeout(300)
+
+        print("== 开机自启 ==")
+        auto_btn = page.locator(".icon-btn[title='开机自启']")
+        check("33 自启按钮存在且初始未激活", auto_btn.count() == 1 and
+              auto_btn.get_attribute("aria-pressed") == "false")
+        auto_btn.click()
+        page.wait_for_timeout(200)
+        check("34 浏览器下点击提示仅桌面端", "仅桌面端" in page.locator(".toast").inner_text())
+
+        print("== 便笺拖拽排序 ==")
+        page.evaluate("(d) => localStorage.setItem('piwidget-data', JSON.stringify(d))", {
+            "version": 3, "pinned": False, "ghost": False, "timetableCollapsed": False,
+            "notes": [
+                {"id": "n1", "title": "便笺 A", "content": "a"},
+                {"id": "n2", "title": "便笺 B", "content": "b"},
+                {"id": "n3", "title": "便笺 C", "content": "c"},
+            ],
+            "timetables": [{"id": "default", "name": "默认", "cells": {"1": {"1": "高数"}}}],
+            "activeTimetableId": "default",
+        })
+        page.reload(wait_until="networkidle")
+        page.wait_for_selector(".sheet")
+        page.wait_for_timeout(200)
+        page.evaluate("""() => {
+            const cards = document.querySelectorAll('.note-card');
+            const dt = new DataTransfer();
+            cards[0].dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true, cancelable: true }));
+            cards[2].dispatchEvent(new DragEvent('dragover', { dataTransfer: dt, bubbles: true, cancelable: true }));
+            cards[2].dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+            cards[0].dispatchEvent(new DragEvent('dragend', { dataTransfer: dt, bubbles: true }));
+        }""")
+        page.wait_for_timeout(200)
+        order = [page.locator(".note-card").nth(i).inner_text().split("\n")[0] for i in range(3)]
+        check("35 拖拽 0→2 后顺序为 B/C/A", order == ["便笺 B", "便笺 C", "便笺 A"], str(order))
+
+        print("== 多课表 ==")
+        sel = page.locator(".tt-select")
+
+        def opt_texts():
+            return [sel.locator("option").nth(i).inner_text() for i in range(sel.locator("option").count())]
+
+        check("36 初始 1 条课表「默认」", opt_texts() == ["默认"], str(opt_texts()))
+        page.locator(".tt-mini[title='新建课表']").click()
+        page.wait_for_timeout(150)
+        check("37 ＋ 新建「课表 2」并自动切换",
+              opt_texts() == ["默认", "课表 2"] and
+              sel.input_value() == sel.locator("option").nth(1).get_attribute("value"),
+              str(opt_texts()))
+        slots.nth(0).click()
+        page.locator(".tt-edit").fill("化学")
+        page.locator(".tt-edit").press("Enter")
+        page.wait_for_timeout(100)
+        check("38 新课表可填课", slots.nth(0).inner_text() == "化学")
+        sel.select_option(index=0)
+        page.wait_for_timeout(100)
+        check("39 切回「默认」旧课仍在", slots.nth(0).inner_text() == "高数")
+        sel.select_option(index=1)
+        page.wait_for_timeout(100)
+        page.locator(".tt-mini[title='重命名当前课表']").click()
+        page.wait_for_selector(".tt-rename")
+        page.locator(".tt-rename").fill("这学期")
+        page.locator(".tt-rename").press("Enter")
+        page.wait_for_timeout(150)
+        check("40 ✎ 重命名为「这学期」", opt_texts() == ["默认", "这学期"], str(opt_texts()))
+        page.locator(".tt-mini[title='重命名当前课表']").click()
+        page.wait_for_selector(".tt-rename")
+        page.locator(".tt-rename").fill("   ")
+        page.locator(".tt-rename").press("Enter")
+        page.wait_for_timeout(150)
+        check("41 空名被拒（保持「这学期」）", opt_texts() == ["默认", "这学期"] and
+              "名称不能为空" in page.locator(".toast").inner_text(), str(opt_texts()))
+        page.locator(".tt-mini[title='删除当前课表']").click()
+        page.wait_for_timeout(150)
+        check("42 × 删除当前课表，回落「默认」", opt_texts() == ["默认"], str(opt_texts()))
+        page.locator(".tt-mini[title='新建课表']").click()
+        page.wait_for_timeout(100)
+        del_btn = page.locator(".tt-mini[title='删除当前课表']")
+        del_btn.click()
+        page.wait_for_timeout(100)
+        check("43 仅剩 1 条时删除按钮禁用", del_btn.is_disabled())
+        page.keyboard.press("Control+s")
+        page.wait_for_timeout(300)
+        saved3 = page.evaluate("localStorage.getItem('piwidget-data')")
+        check("44 多课表结构已持久化", saved3 and '"timetables"' in saved3 and '"activeTimetableId"' in saved3)
+        # v2 → v3 迁移：单一 timetable → 「默认」
+        page.evaluate("""() => localStorage.setItem('piwidget-data', JSON.stringify(
+            { version: 2, notes: [], timetable: { '2': { '3': '旧课' } } }))""")
+        page.reload(wait_until="networkidle")
+        page.wait_for_selector(".sheet")
+        check("45 v2 数据迁移为「默认」课表且旧课保留",
+              opt_texts() == ["默认"] and slots.nth(13).inner_text() == "旧课")
+
         print("== 截图 ==")
-        # 演示数据 + 中性桌面底
+        # 演示数据（v3，含自定义名课表）+ 中性桌面底
         demo = {
-            "version": 2, "pinned": True, "timetableCollapsed": False,
+            "version": 3, "pinned": False, "ghost": False, "timetableCollapsed": False,
             "notes": [
                 {"id": "a1", "title": "本周待办", "content": "交周报\n整理实验数据\n预约牙医"},
                 {"id": "a2", "title": "购物清单", "content": "燕麦拿铁 x2\n咖啡豆 1kg"},
             ],
-            "timetable": {
-                "1": {"1": "高数", "2": "高数", "4": "英语"},
-                "2": {"1": "物理", "3": "物理"},
-                "3": {"2": "化学", "5": "化学"},
-                "4": {"1": "高数", "6": "体育"},
-                "5": {"3": "编程"},
-            },
+            "timetables": [
+                {"id": "default", "name": "默认", "cells": {
+                    "1": {"1": "高数", "2": "高数", "4": "英语"},
+                    "2": {"1": "物理", "3": "物理"},
+                    "3": {"2": "化学", "5": "化学"},
+                    "4": {"1": "高数", "6": "体育"},
+                    "5": {"3": "编程"},
+                }},
+                {"id": "t2", "name": "这学期", "cells": {
+                    "1": {"2": "线性代数"},
+                    "3": {"4": "概率论"},
+                }},
+            ],
+            "activeTimetableId": "default",
         }
         page.evaluate("(d) => localStorage.setItem('piwidget-data', JSON.stringify(d))", demo)
         page.reload(wait_until="networkidle")
@@ -162,6 +286,7 @@ def main():
         page.add_style_tag(content=f"html {{ background: {DEMO_BG} !important; }}")
         page.wait_for_timeout(900)  # 等 sweep 动画结束
         shot = ROOT / "docs" / "screenshot.png"
+        shot.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(shot))
         print(f"  📸 {shot}")
 

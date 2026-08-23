@@ -1,8 +1,16 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { useStore } from '../store/useStore';
 
-const { state, setCell } = useStore();
+const {
+  state,
+  activeTimetable,
+  setCell,
+  setActiveTimetable,
+  addTimetable,
+  renameTimetable,
+  deleteTimetable,
+} = useStore();
 
 const DAYS = ['一', '二', '三', '四', '五', '六'];
 const PERIODS = Array.from({ length: 8 }, (_, i) => i + 1);
@@ -17,7 +25,34 @@ const editing = ref(null); // { day, period }
 const editText = ref('');
 
 function cellVal(day, period) {
-  return (state.timetable[String(day)] || {})[String(period)] || '';
+  const tt = activeTimetable.value;
+  return (tt && (tt.cells[String(day)] || {})[String(period)]) || '';
+}
+
+// 重命名（inline input，Enter/blur 提交，Esc 取消）
+const renaming = ref(false);
+const renameText = ref('');
+const renameInput = ref(null);
+
+watch(renaming, (v) => {
+  if (v)
+    nextTick(() => {
+      if (renameInput.value) {
+        renameInput.value.focus();
+        renameInput.value.select();
+      }
+    });
+});
+
+function beginRename() {
+  renameText.value = activeTimetable.value ? activeTimetable.value.name : '';
+  renaming.value = true;
+}
+
+function commitRename(save) {
+  if (!renaming.value) return;
+  renaming.value = false;
+  if (save && activeTimetable.value) renameTimetable(activeTimetable.value.id, renameText.value);
 }
 
 function begin(day, period) {
@@ -35,14 +70,47 @@ function commit(save) {
 
 <template>
   <section class="tt-panel">
-    <button
-      class="tt-toggle"
-      :aria-expanded="!state.timetableCollapsed"
-      @click="state.timetableCollapsed = !state.timetableCollapsed"
-    >
-      <span>课表</span>
-      <span class="tt-arrow">▾</span>
-    </button>
+    <div class="tt-header">
+      <button
+        class="tt-toggle"
+        :aria-expanded="!state.timetableCollapsed"
+        @click="state.timetableCollapsed = !state.timetableCollapsed"
+      >
+        <span>课表</span>
+        <span class="tt-arrow">▾</span>
+      </button>
+      <div class="tt-switcher">
+        <input
+          v-if="renaming"
+          ref="renameInput"
+          v-model="renameText"
+          class="tt-rename"
+          aria-label="课表名称"
+          @keyup.enter="commitRename(true)"
+          @keyup.esc="commitRename(false)"
+          @blur="commitRename(true)"
+        />
+        <select
+          v-else
+          class="tt-select"
+          :value="state.activeTimetableId"
+          title="切换课表"
+          @change="setActiveTimetable($event.target.value)"
+        >
+          <option v-for="t in state.timetables" :key="t.id" :value="t.id">{{ t.name }}</option>
+        </select>
+        <button class="tt-mini" title="重命名当前课表" @click="beginRename">✎</button>
+        <button class="tt-mini" title="新建课表" @click="addTimetable">＋</button>
+        <button
+          class="tt-mini"
+          title="删除当前课表"
+          :disabled="state.timetables.length <= 1"
+          @click="deleteTimetable(state.activeTimetableId)"
+        >
+          ×
+        </button>
+      </div>
+    </div>
     <div class="tt-grid-wrap">
       <div class="tt-grid">
         <div class="tt-cell tt-head">节</div>
@@ -89,21 +157,80 @@ function commit(save) {
   flex-direction: column;
 }
 
+.tt-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 0 10px 0 18px;
+  border-bottom: 1px solid var(--line);
+}
 .tt-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  width: 100%;
-  flex: none;
+  flex: 1;
   border: none;
-  border-bottom: 1px solid var(--line);
   background: transparent;
   color: var(--text);
   font-family: var(--font-body);
   font-size: 15px;
   font-weight: 600;
-  padding: 10px 18px;
+  padding: 10px 0;
   cursor: pointer;
+}
+
+/* 课表切换器 */
+.tt-switcher {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.tt-select {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 6px;
+  max-width: 120px;
+  cursor: pointer;
+}
+.tt-rename {
+  width: 120px;
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--highlight);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 3px 6px;
+  outline: none;
+}
+.tt-mini {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color 150ms ease,
+    border-color 150ms ease;
+}
+.tt-mini:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--muted);
+}
+.tt-mini:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .tt-arrow {
   transition: transform 150ms ease;
@@ -125,7 +252,7 @@ function commit(save) {
 :global(.sheet.collapsed) .tt-grid-wrap {
   grid-template-rows: 0fr;
 }
-:global(.sheet.collapsed) .tt-toggle {
+:global(.sheet.collapsed) .tt-header {
   border-bottom: none;
 }
 

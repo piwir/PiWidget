@@ -7,7 +7,7 @@ import Timetable from './components/Timetable.vue';
 import { useStore } from './store/useStore';
 import { useToast } from './store/useToast';
 
-const { state, saveSoon, saveNow, load } = useStore();
+const { state, saveSoon, saveNow, load, syncPinned, refreshAutostart } = useStore();
 const { toast, show } = useToast();
 
 // 任何状态变化 → 防抖落盘
@@ -20,15 +20,17 @@ function onKeydown(e) {
   }
 }
 
-onMounted(() => {
-  load();
+onMounted(async () => {
+  await load();
+  syncPinned(); // 窗口置顶态与已保存状态对齐（默认不置顶）
+  refreshAutostart(); // 自启按钮状态以 OS 注册表为准
   window.addEventListener('keydown', onKeydown);
 });
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 </script>
 
 <template>
-  <div class="sheet" :class="{ collapsed: state.timetableCollapsed }">
+  <div class="sheet" :class="{ collapsed: state.timetableCollapsed, ghost: state.ghost }">
     <TitleBar />
     <div class="body">
       <div class="left">
@@ -51,6 +53,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
   border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
   border-radius: var(--radius);
   overflow: hidden;
+  transition: opacity 200ms ease;
+}
+
+/* 透明化：整卡淡出，桌面透出（与占位弱化同款 0.35） */
+.sheet.ghost {
+  opacity: 0.35;
 }
 
 /* ============ 主体双栏 ============ */

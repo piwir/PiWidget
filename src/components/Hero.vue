@@ -2,7 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { useStore } from '../store/useStore';
 
-const { state } = useStore();
+const { activeTimetable } = useStore();
 
 const WEEK_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 const WEEK_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -22,7 +22,7 @@ const dayCn = computed(() => WEEK_CN[now.value.getDay()]);
 const dayCount = computed(() => {
   const d = now.value.getDay();
   if (d === 0) return 0;
-  const t = state.timetable[String(d)] || {};
+  const t = (activeTimetable.value && activeTimetable.value.cells[String(d)]) || {};
   return Object.values(t).filter(Boolean).length;
 });
 const meta = computed(() =>

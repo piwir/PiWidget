@@ -1,12 +1,14 @@
 <script setup>
 import { useStore } from '../store/useStore';
 
-const { state, togglePin, exportData, importData } = useStore();
+const { state, togglePin, toggleGhost, autostart, toggleAutostart, exportData, importData } = useStore();
 </script>
 
 <template>
   <header class="titlebar">
     <span class="brand" data-tauri-drag-region>PIWIDGET</span>
+    <!-- 拖拽填充区：标题栏空白处可拖窗（按钮须在拖拽区外，v2 子元素不响应点击） -->
+    <div class="drag-fill" data-tauri-drag-region></div>
     <div class="actions">
       <button
         class="icon-btn"
@@ -18,6 +20,30 @@ const { state, togglePin, exportData, importData } = useStore();
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 4h6l-1 7 3 3v2H7v-2l3-3-1-7z" />
           <line x1="12" y1="16" x2="12" y2="21" />
+        </svg>
+      </button>
+      <button
+        class="icon-btn"
+        :class="{ active: state.ghost }"
+        :aria-pressed="state.ghost"
+        title="透明化"
+        @click="toggleGhost"
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none" />
+        </svg>
+      </button>
+      <button
+        class="icon-btn"
+        :class="{ active: autostart }"
+        :aria-pressed="autostart"
+        title="开机自启"
+        @click="toggleAutostart"
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v8" />
+          <path d="M6.3 6.6a8 8 0 1 0 11.4 0" />
         </svg>
       </button>
       <button class="icon-btn" title="导出数据" @click="exportData">
@@ -55,6 +81,10 @@ const { state, togglePin, exportData, importData } = useStore();
   font-size: 19px;
   letter-spacing: 0.14em;
   color: var(--text);
+}
+
+.drag-fill {
+  flex: 1;
 }
 
 .actions {
