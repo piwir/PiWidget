@@ -22,6 +22,10 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify tauri CLI
+        run: npm ls @tauri-apps/cli
       - name: Build & draft release (Windows)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -51,6 +55,10 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Verify tauri CLI
+        run: npm ls @tauri-apps/cli
       - name: Build & draft release (Linux)
         uses: tauri-apps/tauri-action@v0
         env:
