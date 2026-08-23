@@ -248,11 +248,12 @@ function commit(save) {
   grid-template-rows: 1fr;
   transition: grid-template-rows 150ms ease;
 }
-/* App 的 .sheet.collapsed 时收起（跨作用域，用 :global 穿透） */
-:global(.sheet.collapsed) .tt-grid-wrap {
+/* App 的 .sheet.collapsed 时收起（跨作用域；整个选择器必须在 :global() 内，
+   否则 scoped 编译器会丢弃 :global() 之后的部分） */
+:global(.sheet.collapsed .tt-grid-wrap) {
   grid-template-rows: 0fr;
 }
-:global(.sheet.collapsed) .tt-header {
+:global(.sheet.collapsed .tt-header) {
   border-bottom: none;
 }
 

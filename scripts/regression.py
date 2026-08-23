@@ -122,9 +122,19 @@ def main():
         page.wait_for_timeout(300)
         saved = page.evaluate("localStorage.getItem('piwidget-data')")
         check("21 数据落 localStorage(piwidget-data)", saved and "高数" in saved)
+        left_w = page.evaluate("document.querySelector('.left').getBoundingClientRect().width")
+        header_y = page.evaluate("document.querySelector('.tt-header').getBoundingClientRect().y")
         page.locator(".tt-toggle").click()
-        check("22 课表折叠", page.evaluate("document.querySelector('.sheet').classList.contains('collapsed')"))
+        page.wait_for_timeout(300)  # 等 0fr 过渡
+        left_w2 = page.evaluate("document.querySelector('.left').getBoundingClientRect().width")
+        header_y2 = page.evaluate("document.querySelector('.tt-header').getBoundingClientRect().y")
+        wrap_h2 = page.evaluate("document.querySelector('.tt-grid-wrap').getBoundingClientRect().height")
+        check("22 课表折叠：跳到底部同时收缩（左栏撑满、课格隐藏）",
+              page.evaluate("document.querySelector('.sheet').classList.contains('collapsed')") and
+              left_w2 > left_w + 300 and header_y2 > header_y + 100 and wrap_h2 < 5,
+              f"left {left_w:.0f}→{left_w2:.0f}, header y {header_y:.0f}→{header_y2:.0f}, wrap {wrap_h2:.0f}px")
         page.locator(".tt-toggle").click()
+        page.wait_for_timeout(300)
         page.keyboard.press("Control+s")
         page.wait_for_timeout(300)
         check("23 Ctrl+S toast「已保存」", "已保存" in page.locator(".toast").inner_text())

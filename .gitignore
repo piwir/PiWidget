@@ -5,3 +5,4 @@ src-tauri/gen/
 *.local
 *.log
 .DS_Store
+AGENTS.md

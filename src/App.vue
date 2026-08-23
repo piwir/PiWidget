@@ -84,7 +84,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
   grid-column: 2;
 }
 
-/* 收起：左栏占满整行，课表标题条落到最下方 */
+/* 收起：课格收缩，「课表」条跳到底部，左栏占满整行 */
 .sheet.collapsed .body {
   grid-template-columns: 1fr;
 }

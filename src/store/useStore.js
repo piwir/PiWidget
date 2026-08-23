@@ -317,8 +317,8 @@ const autostart = ref(false);
 async function refreshAutostart() {
   if (!isTauri) return;
   try {
-    const { Autostart } = await import('@tauri-apps/plugin-autostart');
-    autostart.value = await Autostart.plugin().isEnabled();
+    const { isEnabled } = await import('@tauri-apps/plugin-autostart');
+    autostart.value = await isEnabled();
   } catch {
     /* 忽略 */
   }
@@ -330,14 +330,13 @@ async function toggleAutostart() {
     return;
   }
   try {
-    const { Autostart } = await import('@tauri-apps/plugin-autostart');
-    const plugin = Autostart.plugin();
+    const { enable, disable } = await import('@tauri-apps/plugin-autostart');
     if (autostart.value) {
-      await plugin.disable();
+      await disable();
       autostart.value = false;
       toast('已关闭开机自启');
     } else {
-      await plugin.enable();
+      await enable();
       autostart.value = true;
       toast('已开启开机自启');
     }
