@@ -1,7 +1,8 @@
 /* PiWidget · 全局 store（模块级单例）
  * 数据持久化：Tauri 下写 app_data_dir()/data.json（目录由 identifier 派生），浏览器下 localStorage。
- * schema v3：notes[] + timetables[{id,name,cells{day:{period:课程名}}}] + activeTimetableId。
- * v1（note 字符串）/ v2（单一 timetable）加载/导入时自动迁移。
+ * schema v4：notes[] + timetables[{id,name,cells{day:{period:课程名}}}] + activeTimetableId
+ *        + windowPos{x, y} / windowSize{w, h}（物理像素：窗口位置 / 展开态尺寸，导入时清空）。
+ * v1（note 字符串）/ v2（单一 timetable）/ v3 加载/导入时自动迁移。
  */
 import { reactive, ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
@@ -17,13 +18,15 @@ const SAVE_DEBOUNCE = 800;
 
 export function defaultState() {
   return {
-    version: 3,
+    version: 4,
     pinned: false,
     ghost: false,
     timetableCollapsed: false,
     notes: [],
     timetables: [{ id: 'default', name: '默认', cells: {} }],
     activeTimetableId: 'default',
+    windowPos: null, // { x, y } 物理像素（outerPosition 同单位）
+    windowSize: null, // { w, h } 物理像素（展开态尺寸，outerSize 同单位）
   };
 }
 
@@ -62,7 +65,7 @@ function cleanNotes(notes) {
     }));
 }
 
-/** 归一化（v1 / v2 / v3 均接受），返回 v3 state */
+/** 归一化（v1 / v2 / v3 / v4 均接受），返回 v4 state */
 export function migrate(data) {
   const d = defaultState();
   if (typeof data !== 'object' || data === null) return d;
@@ -87,6 +90,25 @@ export function migrate(data) {
   } else if (typeof data.note === 'string' && data.note) {
     // v1 迁移：单条 note 字符串 → 单条便笺
     d.notes = [{ id: crypto.randomUUID(), title: '便笺', content: data.note }];
+  }
+  // v4：窗口位置 / 展开态尺寸（物理像素）；v1–v3 数据自然得 null
+  if (
+    data.windowPos &&
+    typeof data.windowPos === 'object' &&
+    Number.isFinite(data.windowPos.x) &&
+    Number.isFinite(data.windowPos.y)
+  ) {
+    d.windowPos = { x: data.windowPos.x, y: data.windowPos.y };
+  }
+  if (
+    data.windowSize &&
+    typeof data.windowSize === 'object' &&
+    Number.isFinite(data.windowSize.w) &&
+    Number.isFinite(data.windowSize.h) &&
+    data.windowSize.w > 0 &&
+    data.windowSize.h > 0
+  ) {
+    d.windowSize = { w: data.windowSize.w, h: data.windowSize.h };
   }
   return d;
 }
@@ -117,6 +139,32 @@ export function validate(data) {
       }
     }
     if (!Array.isArray(data.timetables)) return 'timetables 不是数组';
+    return null;
+  }
+  if (data.version === 4) {
+    if (!Array.isArray(data.notes)) return 'notes 不是数组';
+    for (const n of data.notes) {
+      if (!n || typeof n !== 'object' || typeof n.title !== 'string' || typeof n.content !== 'string') {
+        return 'notes 元素需含字符串 title/content';
+      }
+    }
+    if (!Array.isArray(data.timetables)) return 'timetables 不是数组';
+    if (
+      data.windowPos != null &&
+      (typeof data.windowPos !== 'object' ||
+        !Number.isFinite(data.windowPos.x) ||
+        !Number.isFinite(data.windowPos.y))
+    ) {
+      return 'windowPos 需为 null 或 {x, y} 数字';
+    }
+    if (
+      data.windowSize != null &&
+      (typeof data.windowSize !== 'object' ||
+        !Number.isFinite(data.windowSize.w) ||
+        !Number.isFinite(data.windowSize.h))
+    ) {
+      return 'windowSize 需为 null 或 {w, h} 数字';
+    }
     return null;
   }
   return `不支持的 version（当前 ${JSON.stringify(data.version)}）`;
@@ -178,7 +226,8 @@ async function load() {
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
-      (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3)
+      (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 &&
+        parsed.version !== 4)
     ) {
       throw new Error('bad schema');
     }
@@ -311,6 +360,88 @@ async function togglePin() {
   await syncPinned();
 }
 
+// ---------- 窗口位置 / 展开尺寸（仅 Tauri；物理像素；导入时清空） ----------
+
+/**
+ * 启动时恢复窗口尺寸 + 位置，并注册移动/缩放监听（持久化走现有 deep watch → saveSoon）。
+ * 位置仅在与任一屏幕相交时恢复（防拔显示器 / 分辨率变化后落到屏外）。
+ */
+async function restoreWindowState() {
+  if (!isTauri) return;
+  try {
+    const { getCurrentWindow, availableMonitors } = await import('@tauri-apps/api/window');
+    const { PhysicalPosition, PhysicalSize } = await import('@tauri-apps/api/dpi');
+    const win = getCurrentWindow();
+    const size = state.windowSize;
+    const pos = state.windowPos;
+    if (size && size.w > 0 && size.h > 0) {
+      await win.setSize(new PhysicalSize(size.w, size.h));
+    }
+    if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+      const scale = await win.scaleFactor();
+      const w = size?.w ?? Math.round(760 * scale);
+      const h = size?.h ?? Math.round(540 * scale);
+      const monitors = await availableMonitors();
+      const onScreen = monitors.some(
+        (m) =>
+          pos.x < m.position.x + m.size.width &&
+          pos.x + w > m.position.x &&
+          pos.y < m.position.y + m.size.height &&
+          pos.y + h > m.position.y
+      );
+      if (onScreen) await win.setPosition(new PhysicalPosition(pos.x, pos.y));
+    }
+    win.onMoved(({ payload }) => {
+      state.windowPos = { x: payload.x, y: payload.y };
+    });
+    win.onResized(({ payload }) => {
+      // 收起态手动拖宽不污染展开尺寸（高度跟随）
+      state.windowSize = state.timetableCollapsed
+        ? { w: state.windowSize?.w ?? payload.w, h: payload.h }
+        : { w: payload.w, h: payload.h };
+    });
+  } catch {
+    /* 忽略：窗口状态恢复失败不影响主流程 */
+  }
+}
+
+/**
+ * 课表收起/展开后把窗口宽度同步到对应状态（仅 Tauri；高度不变）。
+ * 收起目标宽 = (当前展开宽 − 2px sheet 边框) × 0.42 + 2，
+ * 0.42 对应 App.vue 的 42fr/58fr 双栏网格 —— 改网格比例须同步此系数。
+ * 收起态临时放宽 minWidth（560 → 200：最小展开宽 560 → 收起目标 ≈ 236）。
+ */
+async function applyTimetableResize() {
+  if (!isTauri) return;
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const { PhysicalSize } = await import('@tauri-apps/api/dpi');
+    const win = getCurrentWindow();
+    const scale = await win.scaleFactor();
+    const cur = await win.outerSize(); // 物理像素；收起分支调用时窗口仍是展开宽
+    if (state.timetableCollapsed) {
+      const targetW = Math.round((cur.width / scale - 2) * 0.42 + 2) * scale;
+      const minW = Math.round(200 * scale);
+      await win.setMinSize(new PhysicalSize(minW, Math.round(360 * scale)));
+      await win.setSize(new PhysicalSize(Math.max(targetW, minW), cur.height));
+    } else {
+      const s = state.windowSize;
+      const w = s?.w ?? Math.round(760 * scale);
+      const h = s?.h ?? Math.round(540 * scale);
+      await win.setSize(new PhysicalSize(w, h));
+      await win.setMinSize(new PhysicalSize(Math.round(560 * scale), Math.round(360 * scale)));
+    }
+  } catch {
+    /* 忽略 */
+  }
+}
+
+async function toggleTimetableCollapse() {
+  state.timetableCollapsed = !state.timetableCollapsed;
+  saveSoon();
+  await applyTimetableResize();
+}
+
 // ---------- 开机自启（仅 Tauri；OS 注册表是事实源，不写入数据文件） ----------
 const autostart = ref(false);
 
@@ -385,6 +516,9 @@ async function importRaw(raw) {
     return;
   }
   Object.assign(state, migrate(data));
+  // 窗口坐标是机器相关的：导入他人数据不应让窗口跳位
+  state.windowPos = null;
+  state.windowSize = null;
   expandedId.value = null;
   justCreatedId.value = null;
   await saveNow();
@@ -437,6 +571,9 @@ export function useStore() {
     deleteTimetable,
     togglePin,
     syncPinned,
+    restoreWindowState,
+    applyTimetableResize,
+    toggleTimetableCollapse,
     toggleGhost,
     exportData,
     importData,

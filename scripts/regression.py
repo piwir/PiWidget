@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PiWidget 回归自检（25 项 + 黄条零重叠断言 ×3）+ README 截图。
+"""PiWidget 回归自检（48 项 + 黄条零重叠断言 ×3）+ README 截图。
 
 用法: python3 scripts/regression.py [url]
 默认 url = http://localhost:4173（vite preview）。
@@ -266,6 +266,33 @@ def main():
         page.wait_for_selector(".sheet")
         check("45 v2 数据迁移为「默认」课表且旧课保留",
               opt_texts() == ["默认"] and slots.nth(13).inner_text() == "旧课")
+
+        print("== 窗口状态（schema v4） ==")
+        left_w = page.evaluate("document.querySelector('.left').getBoundingClientRect().width")
+        sheet_w = page.evaluate("document.querySelector('.sheet').getBoundingClientRect().width")
+        check("46 左栏宽度 ≈ 42% 窗口宽（收起收缩公式依据）",
+              abs(left_w / sheet_w - 0.42) < 0.02, f"{left_w:.0f}/{sheet_w:.0f} = {left_w/sheet_w:.3f}")
+        page.evaluate("""() => localStorage.setItem('piwidget-data', JSON.stringify(
+            { version: 3, pinned: false, ghost: false, timetableCollapsed: false,
+              notes: [], timetables: [{ id: 'default', name: '默认', cells: {} }],
+              activeTimetableId: 'default' }))""")
+        page.reload(wait_until="networkidle")
+        page.wait_for_selector(".sheet")
+        page.keyboard.press("Control+s")
+        page.wait_for_timeout(300)
+        saved4 = page.evaluate("localStorage.getItem('piwidget-data')")
+        check("47 v3 数据自动迁移为 v4（含 windowPos/windowSize 字段）",
+              saved4 and '"version": 4' in saved4
+              and '"windowPos"' in saved4 and '"windowSize"' in saved4)
+        page.locator(".tt-toggle").click()
+        page.wait_for_timeout(200)
+        page.keyboard.press("Control+s")
+        page.wait_for_timeout(300)
+        saved5 = page.evaluate("localStorage.getItem('piwidget-data')")
+        check("48 折叠状态持久化（timetableCollapsed: true）",
+              saved5 and '"timetableCollapsed": true' in saved5)
+        page.locator(".tt-toggle").click()
+        page.wait_for_timeout(200)
 
         print("== 截图 ==")
         # 演示数据（v3，含自定义名课表）+ 中性桌面底

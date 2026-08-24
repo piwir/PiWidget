@@ -7,7 +7,16 @@ import Timetable from './components/Timetable.vue';
 import { useStore } from './store/useStore';
 import { useToast } from './store/useToast';
 
-const { state, saveSoon, saveNow, load, syncPinned, refreshAutostart } = useStore();
+const {
+  state,
+  saveSoon,
+  saveNow,
+  load,
+  syncPinned,
+  refreshAutostart,
+  restoreWindowState,
+  applyTimetableResize,
+} = useStore();
 const { toast, show } = useToast();
 
 // 任何状态变化 → 防抖落盘
@@ -22,6 +31,10 @@ function onKeydown(e) {
 
 onMounted(async () => {
   await load();
+  await restoreWindowState(); // 窗口位置 / 展开尺寸恢复 + 移动缩放监听（浏览器 no-op）
+  if (state.timetableCollapsed) {
+    await applyTimetableResize(); // 上次关窗是收起态：先恢复展开尺寸再收缩到便笺宽
+  }
   syncPinned(); // 窗口置顶态与已保存状态对齐（默认不置顶）
   refreshAutostart(); // 自启按钮状态以 OS 注册表为准
   window.addEventListener('keydown', onKeydown);

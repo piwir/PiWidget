@@ -92,4 +92,8 @@ function onDrop(target) {
   color: var(--text);
   border-color: var(--muted);
 }
+.note-add:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--highlight) 60%, transparent);
+  outline-offset: -2px;
+}
 </style>

@@ -10,6 +10,7 @@ const {
   addTimetable,
   renameTimetable,
   deleteTimetable,
+  toggleTimetableCollapse,
 } = useStore();
 
 const DAYS = ['一', '二', '三', '四', '五', '六'];
@@ -74,7 +75,7 @@ function commit(save) {
       <button
         class="tt-toggle"
         :aria-expanded="!state.timetableCollapsed"
-        @click="state.timetableCollapsed = !state.timetableCollapsed"
+        @click="toggleTimetableCollapse()"
       >
         <span>课表</span>
         <span class="tt-arrow">▾</span>
@@ -173,9 +174,11 @@ function commit(save) {
   border: none;
   background: transparent;
   color: var(--text);
-  font-family: var(--font-body);
-  font-size: 15px;
-  font-weight: 600;
+  /* 区块标题与品牌同声音（display 窄体） */
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   padding: 10px 0;
   cursor: pointer;
 }
@@ -290,8 +293,8 @@ function commit(save) {
 
 .tt-head {
   font-family: var(--font-mono);
-  font-size: 12px;
-  letter-spacing: 0.08em;
+  font-size: 11px;
+  letter-spacing: 0.14em;
   color: var(--muted);
   text-align: center;
   padding: 5px 2px;
@@ -306,24 +309,48 @@ function commit(save) {
   padding-right: 8px;
 }
 
+/* ============ 有课 / 无课层次 ============
+   课程名 = 网格的声音（与品牌 / Hero 同字体：display 窄体，CJK 落回系统 CJK）
+   有课：card 表面抬升；无课：墨底 + 小破折号，弱化 0.35
+   今日列：荧光笔染色，今日+有课为全页最亮格 */
 .tt-slot {
   cursor: text;
-}
-.tt-slot:hover {
+  text-align: center;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   background: var(--card);
 }
 .tt-slot.empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
   color: var(--muted);
   opacity: 0.35;
+  background: var(--ink);
+}
+.tt-slot:hover {
+  background: color-mix(in srgb, var(--text) 8%, var(--card));
+}
+.tt-slot.empty:hover {
+  background: var(--card);
 }
 
 /* 今日列：淡荧光黄底 + 表头荧光笔下划线 */
 .tt-slot.today,
 .tt-head.today {
-  background: color-mix(in srgb, var(--highlight) 7%, var(--ink));
+  background: color-mix(in srgb, var(--highlight) 8%, var(--ink));
+}
+.tt-slot.today:not(.empty) {
+  background: color-mix(in srgb, var(--highlight) 14%, var(--card));
 }
 .tt-slot.today:hover {
   background: color-mix(in srgb, var(--highlight) 14%, var(--ink));
+}
+.tt-slot.today:not(.empty):hover {
+  background: color-mix(in srgb, var(--highlight) 20%, var(--card));
 }
 .tt-head.today {
   color: var(--text);
@@ -340,18 +367,31 @@ function commit(save) {
   background: var(--highlight);
 }
 
-/* 单元格 inline 编辑 */
+/* 单元格 inline 编辑（字体与课程名一致，透明底透出格子底色） */
 .tt-edit {
   width: 100%;
   height: 100%;
   border: none;
   outline: 2px solid var(--highlight);
   outline-offset: -2px;
-  background: var(--ink);
+  background: transparent;
   color: var(--text);
-  font-family: var(--font-body);
-  font-size: 13px;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: center;
   padding: 3px 6px;
   user-select: text;
+}
+
+/* 键盘焦点：与 .tt-edit 荧光描边同语言 */
+.tt-slot:focus-visible,
+.tt-mini:focus-visible,
+.tt-toggle:focus-visible,
+.tt-select:focus-visible,
+.tt-rename:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--highlight) 60%, transparent);
+  outline-offset: -2px;
 }
 </style>

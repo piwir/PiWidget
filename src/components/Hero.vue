@@ -99,6 +99,13 @@ const meta = computed(() =>
   }
 }
 
+/* 减少动态偏好：黄条静态全显，跳过扫入 */
+@media (prefers-reduced-motion: reduce) {
+  .hero-day::before {
+    animation: none;
+  }
+}
+
 .meta {
   font-family: var(--font-mono);
   font-size: 13px;

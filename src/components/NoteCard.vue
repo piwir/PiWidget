@@ -118,7 +118,7 @@ watch(
   text-overflow: ellipsis;
 }
 .note-excerpt.empty {
-  opacity: 0.6;
+  opacity: 0.35;
 }
 
 .note-title-input {
@@ -135,7 +135,7 @@ watch(
 }
 .note-title-input::placeholder {
   color: var(--muted);
-  opacity: 0.6;
+  opacity: 0.35;
 }
 
 .note-content {
@@ -155,7 +155,7 @@ watch(
 }
 .note-content::placeholder {
   color: var(--muted);
-  opacity: 0.6;
+  opacity: 0.35;
 }
 
 .note-del {
@@ -184,5 +184,10 @@ watch(
 .note-del:hover {
   background: var(--highlight);
   color: var(--ink);
+}
+.note-del:focus-visible {
+  opacity: 1;
+  outline: 2px solid color-mix(in srgb, var(--highlight) 60%, transparent);
+  outline-offset: -2px;
 }
 </style>

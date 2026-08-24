@@ -27,13 +27,6 @@ npm run tauri dev     # 开发（前端热重载）
 npm run tauri build   # 打包安装包
 ```
 
-## 打包产物（Windows）
-
-| 包 | 路径 |
-| --- | --- |
-| NSIS 安装包 | `src-tauri\target\release\bundle\nsis\PiWidget_x64-setup.exe` |
-| MSI | `src-tauri\target\release\bundle\msi\PiWidget_x64.msi` |
-
 ## 数据与隐私
 
 - 数据仅存本地：`%APPDATA%\com.piwidget.app\data.json`，**无任何网络请求**

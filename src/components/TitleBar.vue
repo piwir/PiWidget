@@ -131,4 +131,8 @@ const { state, togglePin, toggleGhost, autostart, toggleAutostart, exportData, i
 .icon-btn.active {
   color: var(--ink);
 }
+.icon-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--highlight) 60%, transparent);
+  outline-offset: -2px;
+}
 </style>
