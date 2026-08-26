@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue';
 import { useStore } from '../store/useStore';
+import { now } from '../utils/clock';
 
 const {
   state,
@@ -18,7 +19,7 @@ const PERIODS = Array.from({ length: 8 }, (_, i) => i + 1);
 const DAY_NUMS = [1, 2, 3, 4, 5, 6];
 
 const today = computed(() => {
-  const d = new Date().getDay();
+  const d = now.value.getDay();
   return d === 0 ? null : d;
 });
 

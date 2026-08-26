@@ -1,6 +1,6 @@
 {
   "name": "piwidget",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "description": "简约桌面便笺 + 周课表小组件（Tauri + Vue，墨色无边框）",
   "scripts": {

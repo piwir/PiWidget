@@ -362,6 +362,19 @@ async function togglePin() {
 
 // ---------- 窗口位置 / 展开尺寸（仅 Tauri；物理像素；导入时清空） ----------
 
+/** 轮询等待窗口实际尺寸到达目标（容差 ±2 物理 px），超时告警：用于定位 resize 失效 / 被 minWidth clamp */
+async function waitForOuterSize(win, target, label) {
+  const tol = 2;
+  for (let i = 0; i < 12; i++) {
+    const cur = await win.outerSize();
+    if (Math.abs(cur.width - target.w) <= tol && Math.abs(cur.height - target.h) <= tol) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const cur = await win.outerSize();
+  console.warn(`[window] ${label} 未达目标：期望 ${target.w}×${target.h}，实际 ${cur.width}×${cur.height}`);
+  return false;
+}
+
 /**
  * 启动时恢复窗口尺寸 + 位置，并注册移动/缩放监听（持久化走现有 deep watch → saveSoon）。
  * 位置仅在与任一屏幕相交时恢复（防拔显示器 / 分辨率变化后落到屏外）。
@@ -376,6 +389,7 @@ async function restoreWindowState() {
     const pos = state.windowPos;
     if (size && size.w > 0 && size.h > 0) {
       await win.setSize(new PhysicalSize(size.w, size.h));
+      await waitForOuterSize(win, size, 'restore');
     }
     if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
       const scale = await win.scaleFactor();
@@ -397,11 +411,11 @@ async function restoreWindowState() {
     win.onResized(({ payload }) => {
       // 收起态手动拖宽不污染展开尺寸（高度跟随）
       state.windowSize = state.timetableCollapsed
-        ? { w: state.windowSize?.w ?? payload.w, h: payload.h }
-        : { w: payload.w, h: payload.h };
+        ? { w: state.windowSize?.w ?? payload.width, h: payload.height }
+        : { w: payload.width, h: payload.height };
     });
-  } catch {
-    /* 忽略：窗口状态恢复失败不影响主流程 */
+  } catch (e) {
+    console.warn('[window] 窗口状态恢复失败：', e);
   }
 }
 
@@ -410,9 +424,29 @@ async function restoreWindowState() {
  * 收起目标宽 = (当前展开宽 − 2px sheet 边框) × 0.42 + 2，
  * 0.42 对应 App.vue 的 42fr/58fr 双栏网格 —— 改网格比例须同步此系数。
  * 收起态临时放宽 minWidth（560 → 200：最小展开宽 560 → 收起目标 ≈ 236）。
+ * last-wins 串行化：快速连点只按最终状态执行一次窗口调整。
  */
+let resizeBusy = false;
+let resizeQueued = false;
+
 async function applyTimetableResize() {
   if (!isTauri) return;
+  if (resizeBusy) {
+    resizeQueued = true;
+    return;
+  }
+  resizeBusy = true;
+  try {
+    do {
+      resizeQueued = false;
+      await applyTimetableResizeOnce();
+    } while (resizeQueued);
+  } finally {
+    resizeBusy = false;
+  }
+}
+
+async function applyTimetableResizeOnce() {
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window');
     const { PhysicalSize } = await import('@tauri-apps/api/dpi');
@@ -424,15 +458,17 @@ async function applyTimetableResize() {
       const minW = Math.round(200 * scale);
       await win.setMinSize(new PhysicalSize(minW, Math.round(360 * scale)));
       await win.setSize(new PhysicalSize(Math.max(targetW, minW), cur.height));
+      await waitForOuterSize(win, { w: Math.max(targetW, minW), h: cur.height }, '收起收缩');
     } else {
       const s = state.windowSize;
       const w = s?.w ?? Math.round(760 * scale);
       const h = s?.h ?? Math.round(540 * scale);
       await win.setSize(new PhysicalSize(w, h));
       await win.setMinSize(new PhysicalSize(Math.round(560 * scale), Math.round(360 * scale)));
+      await waitForOuterSize(win, { w, h }, '展开恢复');
     }
-  } catch {
-    /* 忽略 */
+  } catch (e) {
+    console.warn('[window] 课表窗口尺寸调整失败：', e);
   }
 }
 

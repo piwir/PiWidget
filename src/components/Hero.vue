@@ -1,19 +1,13 @@
 <script setup>
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
+import { computed } from 'vue';
 import { useStore } from '../store/useStore';
+import { now } from '../utils/clock';
 
 const { activeTimetable } = useStore();
 
 const WEEK_EN = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 const WEEK_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const pad2 = (n) => String(n).padStart(2, '0');
-
-const now = ref(new Date());
-let timer = null;
-onMounted(() => {
-  timer = setInterval(() => (now.value = new Date()), 30000);
-});
-onBeforeUnmount(() => clearInterval(timer));
 
 const eyebrow = computed(
   () => `${WEEK_EN[now.value.getDay()]} · ${pad2(now.value.getMonth() + 1)}/${pad2(now.value.getDate())}`
