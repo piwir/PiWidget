@@ -1,0 +1,25 @@
+[package]
+name = "piwidget"
+version = "0.2.0"
+edition = "2024"
+description = "简约桌面便笺 + 周课表小组件（Rust + GPUI Kit，墨色无边框）"
+license = "MIT"
+repository = "https://github.com/pipib/PiWidget"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"
+
+[dependencies]
+gpui-kit = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+directories = "6"
+auto-launch = "0.6"
+
+[dev-dependencies]
+gpui-kit = { version = "0.7", features = ["test-support"] }
+image = "0.25"
