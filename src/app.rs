@@ -1,12 +1,18 @@
 /* PiWidget · 根视图
  *
- * 墨色卡片 + 双栏（便笺 42% / 课表 58%）；折叠时课表条跳到底部、左栏占满整行。
+ * 墨色卡片 + 单列：Hero + 便笺列表；列表首行是固定的「课表」便笺卡，
+ * 展开即内嵌课格，↗ 可把课表开成独立窗口（见 timetable_window.rs）。
  * 状态变更走 800ms 防抖落盘，Ctrl/⌘+S 立即落盘。
+ *
+ * 窗口尺寸一律用**逻辑像素**保存与恢复：v5 之前的物理像素尺寸在高 DPI 屏上
+ * 会让窗口按缩放倍数放大（开机自启动窗口变大），因此 migrate() 直接丢弃旧尺寸，
+ * 这里再按屏幕可视区夹一次兜底。
  */
 
 use std::time::Duration;
 
 use gpui_kit::component::input::InputEvent as InputEventKind;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{
     Disableable as _, Sizable as _, Theme, ThemeMode,
     button::{Button, ButtonVariants as _},
@@ -18,13 +24,15 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::actions::{CancelEdit, SaveNow};
+use crate::grid::CourseGrid;
 use crate::model::{State, WindowPos, WindowSize};
 use crate::storage;
 use crate::theme as tokens;
+use crate::timetable_window::TimetableView;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(800);
-/// 折叠后窗口宽 = 展开宽 × 0.42（与双栏比例一致）
-const COLLAPSED_RATIO: f32 = 0.42;
+/// 恢复窗口时距离屏幕边缘的最小留白（逻辑像素）
+const SCREEN_MARGIN: f32 = 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Editing {
@@ -38,6 +46,8 @@ pub enum Editing {
 pub struct PiWidget {
     state: State,
     expanded: Option<usize>,
+    /// 便笺列表里的课表卡是否展开（与 `expanded` 互斥）
+    timetable_open: bool,
     editing: Editing,
     title_input: Option<Entity<InputState>>,
     body_input: Option<Entity<TextareaState>>,
@@ -48,8 +58,9 @@ pub struct PiWidget {
     dirty: bool,
     autostart_on: bool,
     autostart_available: bool,
-    expanded_width: Option<f32>,
     focus_handle: FocusHandle,
+    /// 已打开的课表窗口（再次点 ↗ 时激活而不是重复开窗）
+    timetable_window: Option<AnyWindowHandle>,
     /// 内联编辑的事件订阅（Enter / 失焦提交）
     edit_subscription: Option<Subscription>,
     /// 防抖落盘任务（保留句柄以便取消）
@@ -60,9 +71,9 @@ impl PiWidget {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let loaded = storage::load();
         let mut this = Self {
-            expanded_width: loaded.state.window_size.map(|s| s.w as f32),
             state: loaded.state,
             expanded: None,
+            timetable_open: false,
             editing: Editing::None,
             title_input: None,
             body_input: None,
@@ -74,6 +85,7 @@ impl PiWidget {
             autostart_on: crate::autostart::is_enabled(),
             autostart_available: crate::autostart::is_supported(),
             focus_handle: cx.focus_handle(),
+            timetable_window: None,
             edit_subscription: None,
             save_task: None,
         };
@@ -101,6 +113,11 @@ impl PiWidget {
 
     pub fn expanded(&self) -> Option<usize> {
         self.expanded
+    }
+
+    /// 便笺列表里的课表卡是否展开
+    pub fn timetable_open(&self) -> bool {
+        self.timetable_open
     }
 
     pub fn autostart_on(&self) -> bool {
@@ -139,6 +156,12 @@ impl PiWidget {
             }
         }
         cx.notify();
+    }
+
+    /// 供课表窗口等外部视图改写数据（单一事实源仍是本实体）
+    pub fn edit_state(&mut self, f: impl FnOnce(&mut State), cx: &mut Context<Self>) {
+        f(&mut self.state);
+        self.mark_dirty(cx);
     }
 
     pub fn save_action(&mut self, _: &SaveNow, window: &mut Window, cx: &mut Context<Self>) {
@@ -208,6 +231,7 @@ impl PiWidget {
         self.state.add_note();
         let index = self.state.notes.len() - 1;
         self.expanded = Some(index);
+        self.timetable_open = false;
         self.mark_dirty(cx);
         self.begin_title_edit(window, cx);
     }
@@ -222,8 +246,23 @@ impl PiWidget {
                 self.commit_current(window, cx);
             }
             self.expanded = Some(index);
+            self.timetable_open = false;
             self.editing = Editing::None;
         }
+        cx.notify();
+    }
+
+    /// 展开 / 收起便笺列表里的课表卡
+    pub fn toggle_timetable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.expanded.is_some() {
+            self.commit_current(window, cx);
+            self.expanded = None;
+        }
+        self.editing = Editing::None;
+        self.cell_input = None;
+        self.name_input = None;
+        self.edit_subscription = None;
+        self.timetable_open = !self.timetable_open;
         cx.notify();
     }
 
@@ -470,32 +509,63 @@ impl PiWidget {
         cx.notify();
     }
 
-    pub fn toggle_collapse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.timetable_collapsed = !self.state.timetable_collapsed;
-        self.mark_dirty(cx);
-        self.apply_collapse_resize(window);
-        cx.notify();
-    }
-
-    /// 收起：窗口宽收缩到 展开宽 × 0.42；展开：恢复已记录的展开宽度。
-    fn apply_collapse_resize(&mut self, window: &mut Window) {
-        let current = window.bounds().size;
-        let scale = window.scale_factor();
-        let current_width = f32::from(current.width) / scale;
-        let height = f32::from(current.height) / scale;
-
-        if self.state.timetable_collapsed {
-            self.expanded_width = Some(current_width);
-            let target = (current_width * COLLAPSED_RATIO).max(200.0);
-            window.resize(size(px(target * scale), px(height * scale)));
-        } else {
-            let target = self
-                .expanded_width
-                .or(self.state.window_size.map(|s| s.w as f32 / scale))
-                .unwrap_or(tokens::DESIGN_WIDTH)
-                .max(tokens::MIN_EXPANDED_WIDTH);
-            window.resize(size(px(target * scale), px(height * scale)));
+    /// 把课表开成独立窗口（延迟到本轮更新结束，避免在窗口更新中途开窗）。
+    /// 已经开过且还活着就激活它，不重复开。
+    pub fn open_timetable_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(existing) = self.timetable_window {
+            if cx.windows().contains(&existing) {
+                existing
+                    .update(cx, |_, window, _| window.activate_window())
+                    .ok();
+                return;
+            }
+            self.timetable_window = None;
         }
+
+        let pi = cx.entity();
+        let displays: Vec<Bounds<Pixels>> = cx
+            .displays()
+            .iter()
+            .map(|display| display.visible_bounds())
+            .collect();
+        let bounds = timetable_window_bounds(window.bounds(), &displays);
+        let main_window = window.window_handle();
+        let this = cx.entity().downgrade();
+
+        cx.defer(move |cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_background: WindowBackgroundAppearance::Transparent,
+                window_decorations: Some(WindowDecorations::Client),
+                window_min_size: Some(size(px(320.0), px(360.0))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("课表".into()),
+                    appears_transparent: true,
+                    traffic_light_position: None,
+                }),
+                is_resizable: true,
+                ..Default::default()
+            };
+            let pi_for_view = pi.clone();
+            let result = gpui_kit::open_window(options, cx, move |window, cx| {
+                let pi = pi_for_view.clone();
+                cx.new(move |cx| TimetableView::new(&pi, window, cx))
+            });
+            match result {
+                Ok((handle, _)) => {
+                    this.update(cx, |view, _| view.timetable_window = Some(handle))
+                        .ok();
+                }
+                Err(err) => {
+                    let message = format!("打开课表窗口失败：{err}");
+                    cx.update_window(main_window, |_, window, cx| {
+                        this.update(cx, |this, cx| this.show_toast(message, true, window, cx))
+                            .ok();
+                    })
+                    .ok();
+                }
+            }
+        });
     }
 
     // ---------- 外观 / 自启 / 导入导出 ----------
@@ -583,6 +653,7 @@ impl PiWidget {
                         Ok(state) => {
                             this.state = state;
                             this.expanded = None;
+                            this.timetable_open = false;
                             this.editing = Editing::None;
                             this.title_input = None;
                             this.body_input = None;
@@ -603,40 +674,36 @@ impl PiWidget {
 
     // ---------- 窗口状态 ----------
 
+    /// 记录窗口位置与尺寸（逻辑像素）。只有主窗口调用，课表窗口不落盘。
     pub fn observe_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.observe_window_bounds(window, |this, window, cx| {
-            let bounds = window.bounds();
-            let scale = window.scale_factor();
-            let width = f32::from(bounds.size.width) / scale;
-            let height = f32::from(bounds.size.height) / scale;
-            let origin = bounds.origin;
-            let scale64 = scale as f64;
-
-            this.state.window_pos = Some(WindowPos {
-                x: f64::from(origin.x) / scale64,
-                y: f64::from(origin.y) / scale64,
-            });
-            // 收起态手动拖宽不污染展开尺寸（只更新高度）
-            if this.state.timetable_collapsed {
-                let saved_w = this
-                    .state
-                    .window_size
-                    .map(|s| s.w)
-                    .unwrap_or(width as f64 * scale64);
-                this.state.window_size = Some(WindowSize {
-                    w: saved_w,
-                    h: height as f64 * scale64,
-                });
-            } else {
-                this.state.window_size = Some(WindowSize {
-                    w: width as f64 * scale64,
-                    h: height as f64 * scale64,
-                });
-                this.expanded_width = Some(width);
-            }
-            this.mark_dirty(cx);
+            this.record_window_bounds(window.bounds().origin, window.bounds().size, cx);
         })
         .detach();
+    }
+
+    /// 把窗口几何写入状态（`window.bounds()` 已是逻辑像素，不再乘缩放因子）。
+    /// 过小的尺寸（最小化 / 收起动画中间态）不覆盖已保存值。
+    pub fn record_window_bounds(
+        &mut self,
+        origin: Point<Pixels>,
+        size: Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let width = f32::from(size.width);
+        let height = f32::from(size.height);
+        if width < tokens::MIN_WIDTH || height < tokens::MIN_HEIGHT {
+            return;
+        }
+        self.state.window_pos = Some(WindowPos {
+            x: f64::from(origin.x),
+            y: f64::from(origin.y),
+        });
+        self.state.window_size = Some(WindowSize {
+            w: width as f64,
+            h: height as f64,
+        });
+        self.mark_dirty(cx);
     }
 
     // ---------- 测试辅助（integration test 专用） ----------
@@ -704,45 +771,125 @@ impl PiWidget {
     }
 }
 
-/// 计算启动窗口边界：恢复上次位置与尺寸，位置带屏外守卫。
+// ---------- 窗口几何 ----------
+
+/// 计算启动窗口边界：恢复上次位置与尺寸，并夹进屏幕可视区域。
 pub fn restored_bounds(cx: &App) -> WindowBounds {
     let loaded = storage::load();
-    let size_w = loaded
-        .state
-        .window_size
-        .map(|s| s.w as f32)
-        .unwrap_or(tokens::DESIGN_WIDTH);
-    let size_h = loaded
-        .state
-        .window_size
-        .map(|s| s.h as f32)
-        .unwrap_or(tokens::DESIGN_HEIGHT);
-
-    let displays: Vec<Bounds<Pixels>> = cx.displays().iter().map(|d| d.bounds()).collect();
-    let origin = loaded
-        .state
-        .window_pos
-        .filter(|pos| on_screen(pos, size_w, size_h, &displays))
-        .map(|pos| point(px(pos.x as f32), px(pos.y as f32)));
-
-    let bounds = Bounds {
-        origin: origin.unwrap_or_else(|| point(px(120.0), px(120.0))),
-        size: size(px(size_w), px(size_h)),
-    };
+    let displays: Vec<Bounds<Pixels>> = cx
+        .displays()
+        .iter()
+        .map(|display| display.visible_bounds())
+        .collect();
+    let bounds = fit_window_bounds(loaded.state.window_pos, loaded.state.window_size, &displays);
     WindowBounds::Windowed(bounds)
 }
 
-/// 位置与任一屏幕相交才恢复（防拔显示器 / 分辨率变化后落到屏外）
-fn on_screen(pos: &WindowPos, w: f32, h: f32, displays: &[Bounds<Pixels>]) -> bool {
-    let x = pos.x as f32;
-    let y = pos.y as f32;
-    displays.iter().any(|bounds| {
-        let left = f32::from(bounds.origin.x);
-        let top = f32::from(bounds.origin.y);
-        let right = left + f32::from(bounds.size.width);
-        let bottom = top + f32::from(bounds.size.height);
-        x < right && x + w > left && y < bottom && y + h > top
-    })
+/// 课表独立窗口的初始边界：相对主窗口错开一点，并夹进所在屏幕。
+pub fn timetable_window_bounds(
+    parent: Bounds<Pixels>,
+    displays: &[Bounds<Pixels>],
+) -> Bounds<Pixels> {
+    let center_x = f32::from(parent.center().x);
+    let center_y = f32::from(parent.center().y);
+    let display = displays
+        .iter()
+        .find(|d| contains_point(d, center_x, center_y))
+        .or_else(|| displays.first());
+
+    let (width, height) = match display {
+        Some(d) => (
+            tokens::TIMETABLE_WIDTH
+                .min(f32::from(d.size.width) - SCREEN_MARGIN * 2.0)
+                .max(320.0),
+            tokens::TIMETABLE_HEIGHT
+                .min(f32::from(d.size.height) - SCREEN_MARGIN * 2.0)
+                .max(tokens::MIN_HEIGHT),
+        ),
+        None => (tokens::TIMETABLE_WIDTH, tokens::TIMETABLE_HEIGHT),
+    };
+    let size = size(px(width), px(height));
+
+    let mut x = f32::from(parent.origin.x) + 48.0;
+    let mut y = f32::from(parent.origin.y) + 24.0;
+    if let Some(d) = display {
+        let left = f32::from(d.origin.x);
+        let top = f32::from(d.origin.y);
+        x = x.clamp(left, left + f32::from(d.size.width) - width);
+        y = y.clamp(top, top + f32::from(d.size.height) - height);
+    }
+    Bounds {
+        origin: point(px(x), px(y)),
+        size,
+    }
+}
+
+/// 纯函数：把保存的窗口状态夹成屏幕内可用的边界。
+///
+/// - 尺寸先夹到 `MIN_WIDTH..=屏幕宽-2*留白`，没有记录时用设计尺寸；
+/// - 位置若与任一屏幕相交则贴边夹取，否则在目标屏幕居中。
+pub fn fit_window_bounds(
+    saved_pos: Option<WindowPos>,
+    saved_size: Option<WindowSize>,
+    displays: &[Bounds<Pixels>],
+) -> Bounds<Pixels> {
+    let fallback_size = size(px(tokens::DESIGN_WIDTH), px(tokens::DESIGN_HEIGHT));
+    let fallback = Bounds {
+        origin: point(px(120.0), px(120.0)),
+        size: fallback_size,
+    };
+    if displays.is_empty() {
+        return fallback;
+    }
+
+    // 目标屏幕：保存位置落在哪块屏就用哪块，否则用第一块（主屏）
+    let home_display = saved_pos.and_then(|pos| {
+        displays
+            .iter()
+            .find(|display| contains_point(display, pos.x as f32, pos.y as f32))
+            .copied()
+    });
+    let target = home_display.unwrap_or(displays[0]);
+
+    let max_w = (f32::from(target.size.width) - SCREEN_MARGIN * 2.0).max(tokens::MIN_WIDTH);
+    let max_h = (f32::from(target.size.height) - SCREEN_MARGIN * 2.0).max(tokens::MIN_HEIGHT);
+
+    let width = saved_size
+        .map(|s| s.w as f32)
+        .unwrap_or(tokens::DESIGN_WIDTH)
+        .clamp(tokens::MIN_WIDTH, max_w);
+    let height = saved_size
+        .map(|s| s.h as f32)
+        .unwrap_or(tokens::DESIGN_HEIGHT)
+        .clamp(tokens::MIN_HEIGHT, max_h);
+    let size = size(px(width), px(height));
+
+    let left = f32::from(target.origin.x);
+    let top = f32::from(target.origin.y);
+    let origin = match saved_pos {
+        // 位置在某块屏上：夹到该屏可视区内（防止贴边后恢复时越界）
+        Some(pos) if home_display.is_some() => {
+            let x = (pos.x as f32).clamp(left, left + f32::from(target.size.width) - width);
+            let y = (pos.y as f32).clamp(top, top + f32::from(target.size.height) - height);
+            point(px(x), px(y))
+        }
+        // 没记录过位置 / 位置已在屏外（拔掉显示器）：在目标屏居中
+        _ => point(
+            px(left + (f32::from(target.size.width) - width) / 2.0),
+            px(top + (f32::from(target.size.height) - height) / 2.0),
+        ),
+    };
+
+    Bounds { origin, size }
+}
+
+fn contains_point(display: &Bounds<Pixels>, x: f32, y: f32) -> bool {
+    let left = f32::from(display.origin.x);
+    let top = f32::from(display.origin.y);
+    x >= left
+        && x < left + f32::from(display.size.width)
+        && y >= top
+        && y < top + f32::from(display.size.height)
 }
 
 // ---------- 主题 ----------
@@ -790,7 +937,6 @@ impl Focusable for PiWidget {
 
 impl Render for PiWidget {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let collapsed = self.state.timetable_collapsed;
         let opacity = if self.state.ghost {
             tokens::FADED
         } else {
@@ -812,7 +958,8 @@ impl Render for PiWidget {
             .on_action(cx.listener(Self::save_action))
             .on_action(cx.listener(Self::cancel_action))
             .child(self.render_titlebar(window, cx))
-            .child(self.render_body(window, cx, collapsed))
+            .child(self.render_hero(cx))
+            .child(self.render_notes(window, cx))
             .when_some(self.toast.clone(), |this, (message, error)| {
                 this.child(self.render_toast(message, error))
             })
@@ -890,59 +1037,6 @@ impl PiWidget {
             .child(actions)
     }
 
-    fn render_body(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        collapsed: bool,
-    ) -> impl IntoElement {
-        if collapsed {
-            let left = v_flex()
-                .id("left-column")
-                .test_support()
-                .flex_1()
-                .min_w_0()
-                .w_full()
-                .child(self.render_hero(cx))
-                .child(self.render_notes(window, cx));
-
-            v_flex()
-                .id("body")
-                .flex_1()
-                .min_h_0()
-                .child(left)
-                .child(self.render_timetable(window, cx, true))
-        } else {
-            let left = v_flex()
-                .id("left-column")
-                .test_support()
-                .flex_none()
-                .w(relative(0.42))
-                .min_w_0()
-                .h_full()
-                .border_r_1()
-                .border_color(tokens::hsla(tokens::LINE))
-                .child(self.render_hero(cx))
-                .child(self.render_notes(window, cx));
-
-            let right = div()
-                .id("right-column")
-                .test_support()
-                .flex_none()
-                .w(relative(0.58))
-                .min_w_0()
-                .h_full()
-                .child(self.render_timetable(window, cx, false));
-
-            h_flex()
-                .id("body")
-                .flex_1()
-                .min_h_0()
-                .child(left)
-                .child(right)
-        }
-    }
-
     fn render_hero(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let now = now();
         let (eyebrow, day_cn) = hero_labels(&now);
@@ -956,10 +1050,11 @@ impl PiWidget {
 
         v_flex()
             .id("hero")
+            .test_support()
             .flex_none()
             .items_center()
-            .pt(px(22.0))
-            .pb(px(14.0))
+            .pt(px(18.0))
+            .pb(px(12.0))
             .border_b_1()
             .border_color(tokens::hsla(tokens::LINE))
             .child(
@@ -976,14 +1071,14 @@ impl PiWidget {
                 v_flex()
                     .items_center()
                     .mt(px(2.0))
-                    .mb(px(6.0))
+                    .mb(px(4.0))
                     .child(
                         div()
                             .id("hero-day")
                             .test_support()
                             .aria_label(day_cn.clone())
-                            .text_size(px(76.0))
-                            .line_height(px(0.9 * 76.0))
+                            .text_size(px(60.0))
+                            .line_height(px(0.95 * 60.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(tokens::hsla(tokens::TEXT))
                             .child(day_cn),
@@ -1013,12 +1108,14 @@ impl PiWidget {
     fn render_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = v_flex()
             .id("notes")
+            .test_support()
             .flex_1()
             .min_h_0()
             .p_3()
             .gap_2()
             .items_start()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .child(self.render_timetable_card(window, cx));
 
         if self.state.notes.is_empty() {
             list = list.child(
@@ -1026,8 +1123,9 @@ impl PiWidget {
                     .id("notes-empty")
                     .test_support()
                     .aria_label("还没有便笺")
-                    .flex_1()
+                    .flex_none()
                     .w_full()
+                    .py(px(24.0))
                     .items_center()
                     .justify_center()
                     .gap_1()
@@ -1045,7 +1143,7 @@ impl PiWidget {
                         div()
                             .text_size(px(11.0))
                             .text_color(tokens::hsla(tokens::MUTED))
-                            .child("点击下方 + 新建"),
+                            .child("点击下方 ＋ 新建"),
                     ),
             );
         }
@@ -1054,12 +1152,231 @@ impl PiWidget {
             list = list.child(self.render_note_card(index, window, cx));
         }
 
+        // 「＋ 新建」下拉：便笺 / 课表
+        let pi = cx.entity().downgrade();
+        let for_note = pi.clone();
+        let for_timetable = pi;
         list.child(
             Button::new("note-add")
-                .label("+ 新增便笺")
+                .label("＋ 新建")
                 .ghost()
                 .w_full()
-                .on_click(cx.listener(|this, _, window, cx| this.add_note(window, cx))),
+                .dropdown_menu(move |menu, _window, _cx| {
+                    let note_entity = for_note.clone();
+                    let timetable_entity = for_timetable.clone();
+                    menu.item(
+                        PopupMenuItem::new("新建便笺").on_click(move |_, window, cx| {
+                            note_entity
+                                .update(cx, |this, cx| this.add_note(window, cx))
+                                .ok();
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("课表").on_click(move |_, window, cx| {
+                            timetable_entity
+                                .update(cx, |this, cx| {
+                                    if !this.timetable_open {
+                                        this.toggle_timetable(window, cx);
+                                    }
+                                })
+                                .ok();
+                        }),
+                    )
+                }),
+        )
+    }
+
+    /// 便笺列表首行：固定的课表卡
+    fn render_timetable_card(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.timetable_open;
+        let name = self.state.active_timetable().name.clone();
+        let today_count = self.state.today_period_count(now().weekday_sun0);
+        let meta = if today_count > 0 {
+            format!("今天 {today_count} 节")
+        } else {
+            "今日无课".to_string()
+        };
+        let can_delete = self.state.timetables.len() > 1;
+        let renaming = self.editing == Editing::TimetableName;
+
+        let mut card = v_flex()
+            .id("tt-note-card")
+            .test_support()
+            .aria_label(name.clone())
+            .flex_none()
+            .w_full()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(tokens::hsla(if open {
+                tokens::alpha(tokens::HIGHLIGHT, 0.55)
+            } else {
+                tokens::LINE
+            }))
+            .bg(tokens::hsla(if open { tokens::CARD } else { tokens::INK }))
+            .px(px(12.0))
+            .py(px(8.0))
+            .gap_1();
+
+        // 窄窗口下分两行：标题行（名称 + 今日节数）/ 操作行（切换 ✎ ＋ × ↗）
+        let title_row = h_flex()
+            .id("tt-note-title-row")
+            .w_full()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("tt-note-toggle")
+                    .test_support()
+                    .aria_label(name.clone())
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(tokens::hsla(tokens::TEXT))
+                    .child(if open {
+                        format!("课表 · {name} ▾")
+                    } else {
+                        format!("课表 · {name} ▸")
+                    })
+                    .cursor(CursorStyle::PointingHand)
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_timetable(window, cx))),
+            )
+            .child(
+                div()
+                    .id("tt-note-meta")
+                    .test_support()
+                    .aria_label(meta.clone())
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(px(12.0))
+                    .text_color(tokens::hsla(tokens::MUTED))
+                    .child(meta),
+            );
+
+        let mut actions = h_flex()
+            .id("tt-note-header")
+            .w_full()
+            .items_center()
+            .justify_end()
+            .gap_1();
+
+        if !renaming {
+            actions = actions
+                .child(
+                    Button::new("tt-active")
+                        .label("切换")
+                        .ghost()
+                        .compact()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.cycle_timetable(window, cx)),
+                        ),
+                )
+                .child(
+                    Button::new("tt-rename")
+                        .label("✎")
+                        .ghost()
+                        .compact()
+                        .on_click(cx.listener(|this, _, window, cx| this.begin_rename(window, cx))),
+                );
+        }
+        let header = actions
+            .child(
+                Button::new("tt-add")
+                    .label("＋")
+                    .ghost()
+                    .compact()
+                    .on_click(cx.listener(|this, _, window, cx| this.add_timetable(window, cx))),
+            )
+            .child(
+                Button::new("tt-del")
+                    .label("×")
+                    .ghost()
+                    .compact()
+                    .disabled(!can_delete)
+                    .on_click(cx.listener(|this, _, window, cx| this.delete_timetable(window, cx))),
+            )
+            .child(
+                // ↗：课表开成独立窗口
+                Button::new("tt-open-window")
+                    .label("↗")
+                    .ghost()
+                    .compact()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_timetable_window(window, cx)
+                    })),
+            );
+
+        let header = v_flex()
+            .id("tt-note-header-block")
+            .w_full()
+            .gap_1()
+            .child(title_row)
+            .child(header);
+
+        card = card.child(header);
+
+        if renaming {
+            if let Some(input) = self.name_input.as_ref() {
+                card = card.child(
+                    h_flex()
+                        .id("tt-rename-row")
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .child(Input::new(input).small().w(px(180.0)))
+                        .child(
+                            Button::new("tt-rename-ok")
+                                .label("✓")
+                                .ghost()
+                                .compact()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.commit_rename(window, cx)
+                                })),
+                        ),
+                );
+            }
+            return card;
+        }
+
+        if !open {
+            return card;
+        }
+
+        let editing = match self.editing {
+            Editing::Cell { day, period } => Some((day, period)),
+            _ => None,
+        };
+        let grid = CourseGrid::new(self.state.active_timetable().cells.clone())
+            .row_height(Some(46.0))
+            .today(now().weekday_sun0)
+            .editing(editing, self.cell_input.clone())
+            .on_pick({
+                let view = cx.entity().downgrade();
+                move |day, period, window, cx| {
+                    view.update(cx, |this, cx| this.begin_cell_edit(day, period, window, cx))
+                        .ok();
+                }
+            })
+            .on_commit({
+                let view = cx.entity().downgrade();
+                move |day, period, window, cx| {
+                    view.update(cx, |this, cx| this.commit_cell_edit(day, period, window, cx))
+                        .ok();
+                }
+            });
+
+        // 窄窗口里 7 列会挤在一起：给课格一个最小宽度并允许横向滚动
+        card.child(
+            div()
+                .id("tt-card-grid")
+                .w_full()
+                .overflow_x_scroll()
+                .child(div().w_full().min_w(px(420.0)).child(grid)),
         )
     }
 
@@ -1223,258 +1540,6 @@ impl PiWidget {
 
     fn editing_matches_note(&self, index: usize) -> bool {
         matches!(self.editing, Editing::Title(i) | Editing::Body(i) if i == index)
-    }
-
-    fn render_timetable(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        collapsed: bool,
-    ) -> impl IntoElement {
-        let wrapper = |header: AnyElement, grid: Option<AnyElement>| {
-            v_flex()
-                .id("timetable")
-                .flex_1()
-                .h_full()
-                .min_h_0()
-                .child(header)
-                .when_some(grid, |this, grid| this.child(grid))
-        };
-
-        let header = h_flex()
-            .id("tt-header")
-            .flex_none()
-            .h(px(42.0))
-            .px(px(14.0))
-            .items_center()
-            .gap_1()
-            .when(!collapsed, |this| {
-                this.border_b_1().border_color(tokens::hsla(tokens::LINE))
-            })
-            .child(
-                Button::new("tt-toggle")
-                    .label(if collapsed { "课表 ▸" } else { "课表 ▾" })
-                    .ghost()
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_collapse(window, cx))),
-            )
-            .child(self.render_timetable_switcher(window, cx));
-
-        if collapsed {
-            return wrapper(header.into_any_element(), None);
-        }
-
-        let grid = div()
-            .id("tt-grid")
-            .flex_1()
-            .h_full()
-            .min_h_0()
-            .p(px(8.0))
-            .child(self.render_grid(window, cx));
-
-        wrapper(header.into_any_element(), Some(grid.into_any_element()))
-    }
-
-    fn render_timetable_switcher(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let renaming = self.editing == Editing::TimetableName;
-        let active_name = self.state.active_timetable().name.clone();
-        let can_delete = self.state.timetables.len() > 1;
-
-        let mut row = h_flex().id("tt-switcher").items_center().gap_1();
-
-        if renaming {
-            if let Some(input) = self.name_input.as_ref() {
-                row = row.child(Input::new(input).small().w(px(120.0)));
-            }
-            row = row.child(
-                Button::new("tt-rename-ok")
-                    .label("✓")
-                    .ghost()
-                    .compact()
-                    .on_click(cx.listener(|this, _, window, cx| this.commit_rename(window, cx))),
-            );
-        } else {
-            row = row
-                .child(
-                    Button::new("tt-active")
-                        .label(format!("{active_name} ▾"))
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.cycle_timetable(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new("tt-rename")
-                        .label("✎")
-                        .ghost()
-                        .compact()
-                        .on_click(cx.listener(|this, _, window, cx| this.begin_rename(window, cx))),
-                )
-                .child(
-                    Button::new("tt-add")
-                        .label("＋")
-                        .ghost()
-                        .compact()
-                        .on_click(cx.listener(|this, _, window, cx| this.add_timetable(window, cx))),
-                )
-                .child(
-                    Button::new("tt-del")
-                        .label("×")
-                        .ghost()
-                        .compact()
-                        .disabled(!can_delete)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.delete_timetable(window, cx);
-                        })),
-                );
-        }
-        row
-    }
-
-    fn render_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        const DAYS: [&str; 6] = ["一", "二", "三", "四", "五", "六"];
-        let today = now().weekday_sun0;
-
-        // 9 行（表头 + 8 节）× 7 列（节次 + 6 天）
-        let mut grid = div()
-            .id("tt-grid-layout")
-            .grid()
-            .grid_cols(7)
-            .grid_rows_min_content(9)
-            .gap(px(1.0))
-            .size_full();
-
-        grid = grid.child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(11.0))
-                .text_color(tokens::hsla(tokens::MUTED))
-                .child("节"),
-        );
-        for (i, day) in DAYS.iter().enumerate() {
-            let is_today = today == (i as u8 + 1);
-            grid = grid.child(
-                div()
-                    .id(("tt-head", i))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(11.0))
-                    .text_color(tokens::hsla(if is_today {
-                        tokens::TEXT
-                    } else {
-                        tokens::MUTED
-                    }))
-                    .child(*day),
-            );
-        }
-
-        for period in 1u8..=8 {
-            grid = grid.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .pr(px(6.0))
-                    .text_size(px(11.0))
-                    .text_color(tokens::hsla(tokens::MUTED))
-                    .child(format!("{period}")),
-            );
-            for day in 1u8..=6 {
-                grid = grid.child(self.render_cell(day, period, window, cx, today));
-            }
-        }
-        grid
-    }
-
-    fn render_cell(
-        &mut self,
-        day: u8,
-        period: u8,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-        today: u8,
-    ) -> impl IntoElement {
-        let text = self.state.cell(day, period).cloned().unwrap_or_default();
-        let empty = text.is_empty();
-        let is_today = today == day;
-        let editing = matches!(
-            self.editing,
-            Editing::Cell { day: d, period: p } if d == day && p == period
-        );
-
-        let bg = if is_today {
-            if empty {
-                tokens::today_bg()
-            } else {
-                tokens::today_filled_bg()
-            }
-        } else if empty {
-            tokens::INK
-        } else {
-            tokens::CARD
-        };
-
-        let mut cell = div()
-            .id(("tt-cell", day as u32 * 10 + period as u32))
-            .test_support()
-            .aria_label(if empty {
-                "—".to_string()
-            } else {
-                text.clone()
-            })
-            .size_full()
-            .min_w_0()
-            .rounded(px(3.0))
-            .bg(tokens::hsla(bg))
-            .flex()
-            .items_center()
-            .justify_center()
-            .px(px(6.0))
-            .py(px(3.0))
-            .cursor(CursorStyle::IBeam);
-
-        if editing {
-            if let Some(input) = self.cell_input.as_ref() {
-                cell = cell.child(Input::new(input).small());
-            }
-            return cell.child(
-                Button::new(("tt-cell-ok", day as u32 * 10 + period as u32))
-                    .label("✓")
-                    .ghost()
-                    .compact()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.commit_cell_edit(day, period, window, cx);
-                    })),
-            );
-        }
-
-        let label = if empty { "—".to_string() } else { text };
-        cell.child(
-            div()
-                .text_size(px(if empty { 11.0 } else { 13.0 }))
-                .font_weight(if empty {
-                    FontWeight::NORMAL
-                } else {
-                    FontWeight::SEMIBOLD
-                })
-                .text_color(tokens::hsla(if empty {
-                    tokens::MUTED
-                } else {
-                    tokens::TEXT
-                }))
-                .opacity(if empty { tokens::FADED } else { 1.0 })
-                .child(label),
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.begin_cell_edit(day, period, window, cx);
-        }))
     }
 
     fn render_toast(&mut self, message: String, error: bool) -> impl IntoElement {
@@ -1653,26 +1718,144 @@ mod tests {
         assert_eq!(state.today_period_count(0), 0);
     }
 
+    /// 单屏 1920×1080：保存的尺寸超过屏幕时按留白夹取
     #[::core::prelude::v1::test]
-    fn off_screen_positions_are_rejected() {
+    fn oversized_saved_size_is_clamped_to_screen() {
         let displays = vec![Bounds {
             origin: point(px(0.0), px(0.0)),
             size: size(px(1920.0), px(1080.0)),
         }];
-        assert!(on_screen(
-            &WindowPos { x: 100.0, y: 100.0 },
-            760.0,
-            540.0,
-            &displays
-        ));
-        assert!(!on_screen(
-            &WindowPos {
-                x: 5000.0,
-                y: 5000.0
+        // 旧版把物理像素写进 windowSize：1.5× 屏幕上 1504 会被当成逻辑像素
+        let bounds = fit_window_bounds(
+            Some(WindowPos { x: 0.0, y: 0.0 }),
+            Some(WindowSize { w: 1504.0, h: 651.0 }),
+            &displays,
+        );
+        assert!(f32::from(bounds.size.width) <= 1920.0 - SCREEN_MARGIN * 2.0);
+        assert!(f32::from(bounds.size.height) <= 1080.0 - SCREEN_MARGIN * 2.0);
+        assert_eq!(f32::from(bounds.size.height), 651.0, "合法高度不被改写");
+    }
+
+    /// 保存尺寸比屏幕还大（换小显示器）时也要能放下
+    #[::core::prelude::v1::test]
+    fn size_larger_than_display_fits_inside() {
+        let displays = vec![Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1280.0), px(800.0)),
+        }];
+        let bounds = fit_window_bounds(
+            None,
+            Some(WindowSize {
+                w: 3000.0,
+                h: 2000.0,
+            }),
+            &displays,
+        );
+        assert!(f32::from(bounds.size.width) <= 1280.0);
+        assert!(f32::from(bounds.size.height) <= 800.0);
+        assert!(f32::from(bounds.size.width) >= tokens::MIN_WIDTH);
+    }
+
+    /// 保存位置跑到屏外：回到该屏居中，而不是留在看不见的地方
+    #[::core::prelude::v1::test]
+    fn offscreen_position_centers_on_display() {
+        let displays = vec![Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1920.0), px(1080.0)),
+        }];
+        let bounds = fit_window_bounds(
+            Some(WindowPos {
+                x: 9000.0,
+                y: 9000.0,
+            }),
+            Some(WindowSize { w: 760.0, h: 540.0 }),
+            &displays,
+        );
+        assert_eq!(f32::from(bounds.origin.x), (1920.0 - 760.0) / 2.0);
+        assert_eq!(f32::from(bounds.origin.y), (1080.0 - 540.0) / 2.0);
+    }
+
+    /// 记住的位置在屏内时原样恢复（只有贴边才夹）
+    #[::core::prelude::v1::test]
+    fn on_screen_position_is_preserved() {
+        let displays = vec![Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1920.0), px(1080.0)),
+        }];
+        let bounds = fit_window_bounds(
+            Some(WindowPos { x: 100.0, y: 80.0 }),
+            Some(WindowSize { w: 760.0, h: 540.0 }),
+            &displays,
+        );
+        assert_eq!(f32::from(bounds.origin.x), 100.0);
+        assert_eq!(f32::from(bounds.origin.y), 80.0);
+        assert_eq!(f32::from(bounds.size.width), 760.0);
+        assert_eq!(f32::from(bounds.size.height), 540.0);
+    }
+
+    /// 第二块屏上的窗口要留在第二块屏
+    #[::core::prelude::v1::test]
+    fn second_display_position_keeps_its_screen() {
+        let displays = vec![
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: size(px(1920.0), px(1080.0)),
             },
-            760.0,
-            540.0,
-            &displays
-        ));
+            Bounds {
+                origin: point(px(1920.0), px(0.0)),
+                size: size(px(2560.0), px(1440.0)),
+            },
+        ];
+        let bounds = fit_window_bounds(
+            Some(WindowPos {
+                x: 2000.0,
+                y: 100.0,
+            }),
+            Some(WindowSize { w: 760.0, h: 540.0 }),
+            &displays,
+        );
+        assert_eq!(f32::from(bounds.origin.x), 2000.0);
+        assert_eq!(f32::from(bounds.size.width), 760.0);
+    }
+
+    /// 课表窗口默认错开主窗口，靠右时会夹回屏幕内
+    #[::core::prelude::v1::test]
+    fn timetable_window_stays_on_screen() {
+        let displays = vec![Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1920.0), px(1080.0)),
+        }];
+        let parent = Bounds {
+            origin: point(px(1500.0), px(900.0)),
+            size: size(px(760.0), px(540.0)),
+        };
+        let bounds = timetable_window_bounds(parent, &displays);
+        assert!(f32::from(bounds.origin.x) >= 0.0);
+        assert!(f32::from(bounds.origin.x) + f32::from(bounds.size.width) <= 1920.0);
+        assert!(f32::from(bounds.origin.y) + f32::from(bounds.size.height) <= 1080.0);
+    }
+
+    /// 屏幕比课表窗口还小时按屏幕缩小
+    #[::core::prelude::v1::test]
+    fn timetable_window_shrinks_on_small_display() {
+        let displays = vec![Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(800.0), px(600.0)),
+        }];
+        let parent = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(760.0), px(540.0)),
+        };
+        let bounds = timetable_window_bounds(parent, &displays);
+        assert!(f32::from(bounds.size.width) <= 800.0);
+        assert!(f32::from(bounds.size.height) <= 600.0);
+    }
+
+    /// 没有任何屏幕信息时不 panic，给出设计尺寸
+    #[::core::prelude::v1::test]
+    fn no_display_falls_back_to_design_size() {
+        let bounds = fit_window_bounds(None, None, &[]);
+        assert_eq!(f32::from(bounds.size.width), tokens::DESIGN_WIDTH);
+        assert_eq!(f32::from(bounds.size.height), tokens::DESIGN_HEIGHT);
     }
 }

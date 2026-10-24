@@ -16,6 +16,7 @@ use gpui_kit::{
 use piwidget::app::PiWidget;
 use piwidget::model::{Note, State, Timetable};
 use piwidget::storage;
+use piwidget::theme as tokens;
 
 /// 中性桌面色，展示透明圆角（与 Vue 版回归脚本一致）
 const DEMO_BG: (u8, u8, u8) = (0x23, 0x26, 0x2e);
@@ -109,7 +110,7 @@ fn renders_readme_screenshot() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
                         origin: Point::default(),
-                        size: size(px(760.0), px(540.0)),
+                        size: size(px(tokens::DESIGN_WIDTH), px(tokens::DESIGN_HEIGHT)),
                     })),
                     ..Default::default()
                 },

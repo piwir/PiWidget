@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag name (e.g. v0.2.0)'
+        description: 'Tag name (e.g. v0.2.1)'
         required: true
-        default: 'v0.0.0'
+        default: 'v0.2.1'
 
 permissions:
   contents: write
@@ -22,9 +22,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build (release)
         run: cargo build --release --locked
+      # build.rs 把 assets/icons/icon.ico 以资源 ID 1 嵌入 exe（GPUI 按 ID 1 取窗口图标）。
+      # 这里在打包前直接验 PE 资源表，缺图标就让 job 失败，避免发出没图标的包。
+      - name: Verify embedded icon
+        shell: pwsh
+        env:
+          # 脚本本身已全 ASCII + 主动 reconfigure，这里只是双保险
+          PYTHONUTF8: '1'
+        run: python scripts/check_windows_icon.py target/release/piwidget.exe
+      - name: Show exe info
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Item target/release/piwidget.exe | Format-List Length, LastWriteTime
+          python -c "import sys; print('python', sys.version)"
       - name: Package
         shell: pwsh
         run: Compress-Archive -Path target/release/piwidget.exe -DestinationPath piwidget-windows.zip
+      - name: Upload built exe (debugging aid)
+        uses: actions/upload-artifact@v4
+        with:
+          name: piwidget-windows-exe
+          path: target/release/piwidget.exe
+          if-no-files-found: error
       - name: Draft release
         uses: softprops/action-gh-release@v2
         with:

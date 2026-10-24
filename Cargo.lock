@@ -5183,10 +5183,11 @@ dependencies = [
 
 [[package]]
 name = "piwidget"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "auto-launch",
  "directories",
+ "embed-resource",
  "gpui-kit",
  "image",
  "serde",

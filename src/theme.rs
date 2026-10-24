@@ -60,18 +60,17 @@ pub const RADIUS: f32 = 10.0;
 /// 弱化态统一透明度（占位课格、透明化 ghost、禁用按钮）
 pub const FADED: f32 = 0.35;
 
-/// 默认窗口宽（逻辑像素）
-pub const DESIGN_WIDTH: f32 = 760.0;
-/// 默认窗口高
-pub const DESIGN_HEIGHT: f32 = 540.0;
-/// 展开态最小宽度
-pub const MIN_WIDTH: f32 = 560.0;
+/// 默认窗口宽（逻辑像素）——便笺是竖长的便签形态
+pub const DESIGN_WIDTH: f32 = 400.0;
+/// 默认窗口高：约为宽度的两倍
+pub const DESIGN_HEIGHT: f32 = 800.0;
+/// 窗口宽度下限
+pub const MIN_WIDTH: f32 = 360.0;
 /// 最小高度
 pub const MIN_HEIGHT: f32 = 360.0;
-/// 课表收起后窗口宽 = 展开宽 × 该系数（对应 42fr/58fr 双栏）
-pub const COLLAPSED_RATIO: f32 = 0.42;
-/// 展开态宽度下限，避免窗口被拖得过窄后无法恢复
-pub const MIN_EXPANDED_WIDTH: f32 = 420.0;
+/// 课表独立窗口的默认尺寸（逻辑像素）
+pub const TIMETABLE_WIDTH: f32 = 780.0;
+pub const TIMETABLE_HEIGHT: f32 = 620.0;
 
 /// token 转 Hsla（GPUI 内置组件走 Hsla）
 pub fn hsla(color: Rgba) -> Hsla {

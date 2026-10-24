@@ -1,11 +1,17 @@
-/* PiWidget · 数据模型（schema v4）
+/* PiWidget · 数据模型（schema v5）
  *
- * 磁盘格式与 Tauri 时代完全一致，旧数据零迁移：
- *   { version: 4, pinned, ghost, timetableCollapsed, notes[],
+ * 磁盘格式：
+ *   { version: 5, pinned, ghost, notes[],
  *     timetables[{id,name,cells{day:{period:课程名}}}], activeTimetableId,
  *     windowPos{x,y}, windowSize{w,h} }
  *
- * v1（note 字符串）/ v2（单一 timetable）/ v3（多课表）在 migrate() 自动升到 v4。
+ * windowPos / windowSize 自 v5 起统一为**逻辑像素**（与 GPUI / 系统坐标一致）。
+ * v4 及以前存的是物理像素，恢复时会被高 DPI 放大，因此 migrate() 丢弃旧的
+ * windowSize（位置保留并按屏幕夹取），课表折叠字段 timetableCollapsed 也一并废弃
+ * —— 课表不再占用右侧栏，改为便笺列表里的固定课表卡 + 独立窗口。
+ *
+ * v1（note 字符串）/ v2（单一 timetable）/ v3（多课表）/ v4（物理像素窗口状态）
+ * 均在 migrate() 自动升到 v5。
  * 改 schema 必须同步：SCHEMA_VERSION、migrate()、validate()、tests/regression.rs。
  */
 
@@ -13,16 +19,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
-/// 窗口左上角（物理像素）
+/// 窗口左上角（逻辑像素，v5 起）
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowPos {
     pub x: f64,
     pub y: f64,
 }
 
-/// 展开态窗口尺寸（物理像素）
+/// 窗口尺寸（逻辑像素，v5 起）
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowSize {
     pub w: f64,
@@ -61,7 +67,6 @@ pub struct State {
     /// 兼容保留：置顶按钮已随 GPUI 迁移移除，字段仍读写以免破坏旧文件。
     pub pinned: bool,
     pub ghost: bool,
-    pub timetable_collapsed: bool,
     pub notes: Vec<Note>,
     pub timetables: Vec<Timetable>,
     pub active_timetable_id: String,
@@ -75,7 +80,6 @@ impl Default for State {
             version: SCHEMA_VERSION,
             pinned: false,
             ghost: false,
-            timetable_collapsed: false,
             notes: Vec::new(),
             timetables: vec![Timetable::empty("default", "默认")],
             active_timetable_id: "default".into(),
@@ -295,7 +299,7 @@ fn clean_notes(raw: &Value) -> Vec<Note> {
         .unwrap_or_default()
 }
 
-/// 归一化：v1 / v2 / v3 / v4 均接受，返回 v4 状态（与 Vue 版 migrate() 等价）
+/// 归一化：v1 / v2 / v3 / v4 / v5 均接受，返回 v5 状态
 pub fn migrate(data: &Value) -> State {
     let mut state = State::default();
     if !data.is_object() {
@@ -308,9 +312,7 @@ pub fn migrate(data: &Value) -> State {
     if let Some(v) = data.get("ghost").and_then(Value::as_bool) {
         state.ghost = v;
     }
-    if let Some(v) = data.get("timetableCollapsed").and_then(Value::as_bool) {
-        state.timetable_collapsed = v;
-    }
+    // v4 及以前的 timetableCollapsed 直接忽略：课表不再有折叠态
 
     if data.get("timetables").is_some_and(Value::is_array) {
         state.timetables = clean_timetables(&data["timetables"]);
@@ -343,8 +345,15 @@ pub fn migrate(data: &Value) -> State {
         }
     }
 
+    let source_version = data.get("version").and_then(Value::as_u64).unwrap_or(0);
+    // v4 及以前 windowSize 存的是物理像素（高 DPI 屏会翻倍），恢复时直接丢弃，
+    // 由 app::restore_bounds 用屏幕尺寸夹取一个合适窗口；位置仍保留（同坐标空间）。
     state.window_pos = parse_window_pos(data.get("windowPos"));
-    state.window_size = parse_window_size(data.get("windowSize"));
+    state.window_size = if source_version >= 5 {
+        parse_window_size(data.get("windowSize"))
+    } else {
+        None
+    };
     state.version = SCHEMA_VERSION;
     state
 }
@@ -407,7 +416,7 @@ pub fn validate(data: &Value) -> Result<(), String> {
             }
             Ok(())
         }
-        Some(4) => {
+        Some(4) | Some(5) => {
             validate_notes(data)?;
             if !data.get("timetables").is_some_and(Value::is_array) {
                 return Err("timetables 不是数组".into());
@@ -458,7 +467,7 @@ mod tests {
     #[test]
     fn default_state_matches_schema() {
         let state = State::default();
-        assert_eq!(state.version, 4);
+        assert_eq!(state.version, 5);
         assert_eq!(state.timetables.len(), 1);
         assert_eq!(state.timetables[0].id, "default");
         assert_eq!(state.active_timetable_id, "default");
@@ -475,7 +484,7 @@ mod tests {
         });
         assert!(validate(&raw).is_ok());
         let state = migrate(&raw);
-        assert_eq!(state.version, 4);
+        assert_eq!(state.version, 5);
         assert_eq!(state.notes.len(), 1);
         assert_eq!(state.notes[0].content, "旧版便笺内容");
         assert_eq!(state.notes[0].title, "便笺");
@@ -515,8 +524,8 @@ mod tests {
         });
         assert!(validate(&raw).is_ok());
         let state = migrate(&raw);
-        assert_eq!(state.version, 4);
-        assert!(state.pinned && state.ghost && state.timetable_collapsed);
+        assert_eq!(state.version, 5);
+        assert!(state.pinned && state.ghost);
         assert_eq!(state.timetables.len(), 2);
         assert_eq!(state.active_timetable_id, "b");
         assert!(state.window_pos.is_none());
@@ -564,9 +573,9 @@ mod tests {
     }
 
     #[test]
-    fn keeps_v4_window_state() {
+    fn keeps_v5_window_state() {
         let raw = json!({
-            "version": 4,
+            "version": 5,
             "notes": [],
             "timetables": [{"id": "default", "name": "默认", "cells": {}}],
             "activeTimetableId": "default",
@@ -577,6 +586,26 @@ mod tests {
         let state = migrate(&raw);
         assert_eq!(state.window_pos, Some(WindowPos { x: 120.0, y: 80.0 }));
         assert_eq!(state.window_size, Some(WindowSize { w: 760.0, h: 540.0 }));
+    }
+
+    /// v4 的 windowSize 是物理像素（高 DPI 会翻倍），恢复时会让窗口开得巨大，
+    /// 因此升级到 v5 时直接丢弃尺寸、只保留位置。
+    #[test]
+    fn drops_v4_physical_window_size() {
+        let raw = json!({
+            "version": 4,
+            "notes": [],
+            "timetables": [{"id": "default", "name": "默认", "cells": {}}],
+            "activeTimetableId": "default",
+            "timetableCollapsed": true,
+            "windowPos": {"x": 892.4, "y": 44.4},
+            "windowSize": {"w": 1504.7, "h": 651.3}
+        });
+        assert!(validate(&raw).is_ok());
+        let state = migrate(&raw);
+        assert_eq!(state.version, 5);
+        assert_eq!(state.window_pos, Some(WindowPos { x: 892.4, y: 44.4 }));
+        assert!(state.window_size.is_none(), "旧物理像素尺寸必须丢弃");
     }
 
     #[test]
@@ -680,10 +709,11 @@ mod tests {
     fn serializes_with_camel_case_field_names() {
         let state = State::default();
         let json = serde_json::to_string(&state).unwrap();
-        assert!(json.contains("\"timetableCollapsed\""));
         assert!(json.contains("\"activeTimetableId\""));
         assert!(json.contains("\"windowPos\""));
         assert!(json.contains("\"windowSize\""));
-        assert!(json.contains("\"version\":4"));
+        assert!(json.contains("\"version\":5"));
+        // 课表折叠态在 v5 已移除，不再写回磁盘
+        assert!(!json.contains("timetableCollapsed"));
     }
 }

@@ -1,9 +1,9 @@
 /* PiWidget 回归自检（gpui-kit 无头 UI 测试）
  *
- * 对应 Vue 时代 scripts/regression.py 的 51 项断言，按语义重写为 Rust 断言：
+ * 对应 Vue 时代 scripts/regression.py 的断言，按语义重写为 Rust 断言：
  *   - 观测真实渲染树（元素 id + 无障碍属性 + 布局边界）
  *   - 用真实指针/键盘事件驱动交互，不直接调用内部方法
- *   - 覆盖便笺 CRUD、课表编辑、多课表、折叠、持久化、迁移、透明化
+ *   - 覆盖便笺 CRUD、课表卡与新窗口、多课表、持久化、迁移、窗口尺寸恢复
  *
  * 运行：cargo test --test regression
  * 截图：cargo test --test screenshot（仅 macOS，见该文件说明）
@@ -221,13 +221,24 @@ fn empty_state_invites_first_note(cx: &mut TestAppContext) {
 
 // ---------- 便笺 CRUD ----------
 
+/// 「＋ 新建」现在是下拉：点开菜单里的「新建便笺」
+fn add_note_via_menu(harness: &Harness, cx: &mut TestAppContext) {
+    harness.click("note-add", cx);
+    harness.render(cx);
+    cx.update_window(harness.window, |_, window, cx| {
+        window.within("popup-menu").click(0usize, cx);
+    })
+    .expect("click 新建便笺");
+    harness.render(cx);
+}
+
 #[gpui_kit::test]
 fn note_create_edit_collapse_and_delete(cx: &mut TestAppContext) {
     temp_data_dir("case4");
     reset_state(base_state());
     let harness = Harness::open(cx);
 
-    harness.click("note-add", cx);
+    add_note_via_menu(&harness, cx);
     harness.update(cx, |this, _, _| {
         assert_eq!(this.state().notes.len(), 1, "新增便笺出现");
         assert_eq!(this.expanded(), Some(0), "新建后自动展开");
@@ -317,12 +328,39 @@ fn note_reorder_moves_item(cx: &mut TestAppContext) {
 
 // ---------- 课表 ----------
 
+/// 打开便笺列表首行的课表卡（课表不再占右侧栏，默认收起）
+fn open_timetable_card(harness: &Harness, cx: &mut TestAppContext) {
+    harness.click("tt-note-toggle", cx);
+    harness.render(cx);
+}
+
 #[gpui_kit::test]
-fn timetable_has_48_cells_and_today_column(cx: &mut TestAppContext) {
+fn timetable_lives_in_note_list_as_a_card(cx: &mut TestAppContext) {
     temp_data_dir("case6");
     reset_state(base_state());
     let harness = Harness::open(cx);
     harness.render(cx);
+
+    // 课表卡在便笺列表里，默认收起（不渲染课格，也不再占右侧栏）
+    let card = harness.snapshot("tt-note-card", cx);
+    assert!(card.visible(), "课表卡可见");
+    assert!(
+        cx.update_window(harness.window, |_, window, _| window
+            .try_find("right-column")
+            .is_none())
+        .unwrap(),
+        "不再有 58% 右侧栏"
+    );
+    assert!(
+        cx.update_window(harness.window, |_, window, _| window
+            .try_find(("tt-cell", 11u32))
+            .is_none())
+        .unwrap(),
+        "课表卡收起时不渲染课格"
+    );
+
+    open_timetable_card(&harness, cx);
+    harness.update(cx, |this, _, _| assert!(this.timetable_open(), "课表卡已展开"));
 
     // 8 节 × 6 天
     for day in 1u8..=6 {
@@ -334,12 +372,41 @@ fn timetable_has_48_cells_and_today_column(cx: &mut TestAppContext) {
     }
 
     harness.update(cx, |this, _, _| {
-        assert_eq!(
-            this.state().active_timetable().cells.len(),
-            0,
-            "默认课表为空"
-        );
+        assert_eq!(this.state().active_timetable().cells.len(), 0, "默认课表为空");
     });
+}
+
+#[gpui_kit::test]
+fn new_note_button_offers_timetable_entry(cx: &mut TestAppContext) {
+    temp_data_dir("case6b");
+    reset_state(base_state());
+    let harness = Harness::open(cx);
+    harness.render(cx);
+
+    // ＋ 新建 是下拉：包含「新建便笺」与「课表」
+    harness.click("note-add", cx);
+    harness.render(cx);
+    let menu_items: Vec<String> = cx
+        .update_window(harness.window, |_, window, _| {
+            let mut labels = Vec::new();
+            for i in 0..4usize {
+                if let Some(snap) = window.within("popup-menu").try_find(i) {
+                    if let Some(label) = snap.label() {
+                        labels.push(label.to_string());
+                    }
+                }
+            }
+            labels
+        })
+        .unwrap();
+    assert!(
+        menu_items.iter().any(|l| l.contains("新建便笺")),
+        "下拉含新建便笺，实际 {menu_items:?}"
+    );
+    assert!(
+        menu_items.iter().any(|l| l.contains("课表")),
+        "下拉含课表，实际 {menu_items:?}"
+    );
 }
 
 #[gpui_kit::test]
@@ -348,6 +415,7 @@ fn cell_edit_enter_commits_and_escape_cancels(cx: &mut TestAppContext) {
     reset_state(base_state());
     let harness = Harness::open(cx);
     harness.render(cx);
+    open_timetable_card(&harness, cx);
 
     harness.click(("tt-cell", 11u32), cx);
     harness.render(cx);
@@ -397,6 +465,12 @@ fn today_period_count_follows_active_timetable(cx: &mut TestAppContext) {
         meta.contains("今天") || meta.contains("今日无课"),
         "Hero meta 文案合法，实际 {meta}"
     );
+    // 课表卡上也显示同一份统计
+    let card_meta = harness.label("tt-note-meta", cx);
+    assert!(
+        card_meta.contains("今天") || card_meta.contains("今日无课"),
+        "课表卡统计文案合法，实际 {card_meta}"
+    );
 }
 
 // ---------- 多课表 ----------
@@ -406,6 +480,8 @@ fn multiple_timetables_crud(cx: &mut TestAppContext) {
     temp_data_dir("case9");
     reset_state(base_state());
     let harness = Harness::open(cx);
+    harness.render(cx);
+    open_timetable_card(&harness, cx);
 
     harness.click("tt-add", cx);
     harness.update(cx, |this, _, _| {
@@ -471,40 +547,88 @@ fn multiple_timetables_crud(cx: &mut TestAppContext) {
     });
 }
 
-// ---------- 折叠 ----------
+// ---------- 课表新窗口 ----------
 
 #[gpui_kit::test]
-fn collapse_moves_timetable_to_bottom(cx: &mut TestAppContext) {
+fn timetable_card_opens_a_separate_window(cx: &mut TestAppContext) {
     temp_data_dir("case10");
+    let mut seeded = base_state();
+    seeded.set_cell(1, 1, "高数");
+    reset_state(seeded);
+    let harness = Harness::open(cx);
+    harness.render(cx);
+
+    let windows_before = cx.update(|cx| cx.windows().len());
+    harness.click("tt-open-window", cx);
+    harness.render(cx);
+    let windows_after = cx.update(|cx| cx.windows().len());
+    assert_eq!(
+        windows_after,
+        windows_before + 1,
+        "↗ 打开独立课表窗口（{} → {}）",
+        windows_before,
+        windows_after
+    );
+
+    // 新窗口里能渲染出同一份课格数据
+    let other = cx
+        .update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find(|handle| handle.window_id() != harness.window.window_id())
+        })
+        .expect("找到课表窗口");
+    cx.update_window(other, |_, window, cx| window.render_frame(cx))
+        .expect("渲染课表窗口");
+    cx.update_window(other, |_, window, _| {
+        let cell = window.find(("tt-cell", 11u32));
+        assert_eq!(cell.label().as_deref(), Some("高数"), "课表窗口显示同一份数据");
+    })
+    .expect("读取课表窗口");
+}
+
+/// 重复点 ↗ 只激活已有窗口，不再开第二个
+#[gpui_kit::test]
+fn opening_timetable_window_twice_reuses_it(cx: &mut TestAppContext) {
+    temp_data_dir("case10c");
     reset_state(base_state());
     let harness = Harness::open(cx);
     harness.render(cx);
 
-    let left_before = harness.snapshot("left-column", cx).bounds();
-    let header_before = harness.snapshot("tt-toggle", cx).bounds();
+    harness.click("tt-open-window", cx);
+    harness.render(cx);
+    let after_first = cx.update(|cx| cx.windows().len());
 
-    harness.click("tt-toggle", cx);
+    harness.click("tt-open-window", cx);
+    harness.render(cx);
+    let after_second = cx.update(|cx| cx.windows().len());
+    assert_eq!(
+        after_second, after_first,
+        "第二次点 ↗ 复用已有窗口（{} → {}）",
+        after_first, after_second
+    );
+}
+
+#[gpui_kit::test]
+fn timetable_card_stays_without_main_window_column(cx: &mut TestAppContext) {
+    temp_data_dir("case10b");
+    reset_state(base_state());
+    let harness = Harness::open(cx);
     harness.render(cx);
 
-    harness.update(cx, |this, _, _| {
-        assert!(this.state().timetable_collapsed, "折叠状态已记录");
-    });
+    // 收起 → 展开 → 收起，课表卡始终在列表首行
+    let collapsed_card = harness.snapshot("tt-note-card", cx).bounds();
+    open_timetable_card(&harness, cx);
+    harness.update(cx, |this, window, cx| this.toggle_timetable(window, cx));
+    harness.render(cx);
 
-    let left_after = harness.snapshot("left-column", cx).bounds();
-    let header_after = harness.snapshot("tt-toggle", cx).bounds();
-
-    assert!(
-        left_after.size.width > left_before.size.width,
-        "左栏撑满整行：{} → {}",
-        left_before.size.width,
-        left_after.size.width
+    let again = harness.snapshot("tt-note-card", cx).bounds();
+    assert_eq!(
+        f32::from(collapsed_card.origin.y),
+        f32::from(again.origin.y),
+        "课表卡位置稳定在便笺列表首行"
     );
-    assert!(
-        header_after.origin.y > header_before.origin.y,
-        "「课表」条跳到底部：{} → {}",
-        header_before.origin.y,
-        header_after.origin.y
-    );
+    harness.update(cx, |this, _, _| assert!(!this.timetable_open(), "再次点击收起"));
 }
 
 // ---------- 持久化与迁移 ----------
@@ -569,9 +693,84 @@ fn v1_data_migrates_on_load(cx: &mut TestAppContext) {
     harness.render(cx);
     harness.update(cx, |this, _, _| {
         assert_eq!(this.state().notes[0].content, "旧版便笺内容", "v1 迁移便笺");
-        assert_eq!(this.state().version, 4, "迁移到 v4");
+        assert_eq!(this.state().version, 5, "迁移到 v5");
     });
+    open_timetable_card(&harness, cx);
     assert_eq!(harness.label(("tt-cell", 12u32), cx), "旧课", "v1 迁移课表");
+}
+
+/// 自启动窗口变大的回归：v4 数据里存的是物理像素尺寸（高 DPI 下 1504 逻辑像素
+/// 被当成物理像素写盘），开机恢复时不能再原样当窗口尺寸用。
+#[gpui_kit::test]
+fn v4_physical_window_size_does_not_restore_oversized(cx: &mut TestAppContext) {
+    let dir = temp_data_dir("v4-window");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("data.json"),
+        r#"{
+            "version": 4,
+            "notes": [],
+            "timetables": [{"id":"default","name":"默认","cells":{}}],
+            "activeTimetableId": "default",
+            "timetableCollapsed": true,
+            "windowPos": {"x": 40, "y": 40},
+            "windowSize": {"w": 1504.6666, "h": 651.3333}
+        }"#,
+    )
+    .unwrap();
+
+    let harness = Harness::open(cx);
+    harness.render(cx);
+    harness.update(cx, |this, _, _| {
+        assert_eq!(this.state().version, 5, "升级到 v5");
+        assert!(
+            this.state().window_size.is_none(),
+            "旧物理像素尺寸被丢弃，实际 {:?}",
+            this.state().window_size
+        );
+        assert!(
+            this.state().window_pos.is_some(),
+            "位置仍然保留（同一坐标空间）"
+        );
+    });
+
+    // 落盘后不再写回废弃的折叠字段，尺寸也换成 v5 的逻辑像素
+    harness.update(cx, |this, window, cx| {
+        this.save_action(&piwidget::actions::SaveNow, window, cx);
+    });
+    let raw = std::fs::read_to_string(storage::data_path()).unwrap();
+    assert!(
+        !raw.contains("timetableCollapsed"),
+        "升级后不再写回废弃的折叠字段"
+    );
+    assert!(raw.contains("\"version\": 5"), "落盘为 v5，实际 {raw}");
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(value["windowSize"].is_null(), "旧尺寸已被丢弃且未被写回");
+}
+
+#[gpui_kit::test]
+fn window_size_persists_in_logical_pixels(cx: &mut TestAppContext) {
+    temp_data_dir("window-logical");
+    reset_state(base_state());
+    let harness = Harness::open(cx);
+    harness.render(cx);
+
+    harness.update(cx, |this, window, cx| {
+        let bounds = window.bounds();
+        this.record_window_bounds(bounds.origin, bounds.size, cx);
+        this.save_action(&piwidget::actions::SaveNow, window, cx);
+    });
+
+    let raw = std::fs::read_to_string(storage::data_path()).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let saved = &value["windowSize"];
+    let w = saved["w"].as_f64().expect("windowSize.w");
+    let h = saved["h"].as_f64().expect("windowSize.h");
+    assert!(
+        (360.0..=4000.0).contains(&w) && (360.0..=4000.0).contains(&h),
+        "落盘尺寸是逻辑像素而不是物理像素，实际 {w}×{h}"
+    );
+    assert_eq!(value["version"], 5, "写回 v5");
 }
 
 #[gpui_kit::test]
@@ -611,18 +810,23 @@ fn autostart_button_reports_platform_support(cx: &mut TestAppContext) {
 // ---------- 布局 ----------
 
 #[gpui_kit::test]
-fn left_column_is_42_percent_when_expanded(cx: &mut TestAppContext) {
+fn notes_fill_the_whole_window_width(cx: &mut TestAppContext) {
     temp_data_dir("case14");
     reset_state(base_state());
     let harness = Harness::open(cx);
     harness.render(cx);
 
     let sheet = harness.snapshot("sheet", cx).bounds();
-    let left = harness.snapshot("left-column", cx).bounds();
-    let ratio = f32::from(left.size.width) / f32::from(sheet.size.width);
+    let notes = harness.snapshot("notes", cx).bounds();
+    let ratio = f32::from(notes.size.width) / f32::from(sheet.size.width);
     assert!(
-        (ratio - 0.42).abs() < 0.06,
-        "左栏宽度 ≈ 42% 窗口宽，实际 {ratio:.3}"
+        ratio > 0.95,
+        "便笺列表占满整宽（课表已移出右栏），实际 {ratio:.3}"
+    );
+    let hero = harness.snapshot("hero", cx).bounds();
+    assert!(
+        f32::from(hero.size.width) / f32::from(sheet.size.width) > 0.95,
+        "Hero 也占满整宽"
     );
 }
 

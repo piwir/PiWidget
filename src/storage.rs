@@ -201,7 +201,6 @@ mod tests {
         let temp = TempDir::new("roundtrip");
         let mut state = State::default();
         state.ghost = true;
-        state.timetable_collapsed = true;
         state.notes.push(Note {
             id: "n1".into(),
             title: "买咖啡".into(),
@@ -262,7 +261,7 @@ mod tests {
         let loaded = load_from(&temp.file(), &temp.bak());
         assert_eq!(loaded.state.notes[0].content, "旧版便笺内容");
         assert_eq!(loaded.state.timetables[0].cells["1"]["2"], "旧课");
-        assert_eq!(loaded.state.version, 4);
+        assert_eq!(loaded.state.version, 5);
     }
 
     #[test]

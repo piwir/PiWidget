@@ -1,0 +1,9 @@
+// PiWidget Windows resource script.
+//
+// Keep this file ASCII-only: rc.exe reads .rc in the system ANSI codepage,
+// so UTF-8 text here can break the build. Explanations live in build.rs.
+//
+// The resource ID MUST stay 1: GPUI's Windows backend loads the window icon
+// with LoadImageW(module, PCWSTR(1), IMAGE_ICON, ...).
+
+1 ICON "assets/icons/icon.ico"
